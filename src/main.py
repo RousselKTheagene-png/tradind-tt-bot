@@ -16,12 +16,18 @@ from .monitoring.journal import TradeJournal
 from .monitoring.logger import configure_logging
 from .risk.risk_manager import RiskLimits, RiskManager
 from .strategies.base import Side, Strategy
+from .strategies.bollinger_squeeze import BollingerSqueeze
+from .strategies.donchian_breakout import DonchianBreakout
 from .strategies.ema_crossover import EmaCrossover
+from .strategies.macd_divergence import MacdDivergence
 from .strategies.rsi_reversion import RsiReversion
 
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "ema_crossover": EmaCrossover,
     "rsi_reversion": RsiReversion,
+    "bollinger_squeeze": BollingerSqueeze,
+    "macd_divergence": MacdDivergence,
+    "donchian_breakout": DonchianBreakout,
 }
 
 

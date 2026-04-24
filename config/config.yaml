@@ -32,6 +32,26 @@ strategies:
       period: 14
       oversold: 30
       overbought: 70
+  - name: bollinger_squeeze
+    enabled: false
+    params:
+      period: 20
+      num_std: 2.0
+      squeeze_lookback: 50
+      squeeze_percentile: 0.25
+      squeeze_bars: 10
+  - name: macd_divergence
+    enabled: false
+    params:
+      fast: 12
+      slow: 26
+      signal: 9
+      lookback: 60
+      pivot_order: 3
+  - name: donchian_breakout
+    enabled: false
+    params:
+      entry_period: 20
 
 risk:
   max_risk_per_trade_pct: 1.0
