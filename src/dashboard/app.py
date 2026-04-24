@@ -15,21 +15,12 @@ from typing import Any, Iterable, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from ..monitoring.sqlite_journal import iter_events_from
 from .html import INDEX_HTML
 
 
 def _iter_events(path: Path) -> Iterable[dict[str, Any]]:
-    if not path.exists():
-        return
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    yield from iter_events_from(path)
 
 
 def _tail(events: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
