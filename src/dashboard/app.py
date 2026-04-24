@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -17,6 +18,28 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..monitoring.sqlite_journal import iter_events_from
 from .html import INDEX_HTML
+
+_CHART_TTL = 30.0
+_chart_cache: dict[tuple[str, str, str], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _fetch_candles(exchange: str, symbol: str, timeframe: str,
+                   limit: int) -> list[dict[str, Any]]:
+    """Fetch OHLCV via ccxt and cache for ``_CHART_TTL`` seconds."""
+    key = (exchange, symbol, timeframe)
+    now = time.time()
+    cached = _chart_cache.get(key)
+    if cached and now - cached[0] < _CHART_TTL:
+        return cached[1][-limit:]
+    from ..data.crypto_provider import CryptoProvider
+    prov = CryptoProvider(exchange=exchange)
+    df = prov.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    candles = [{"time": int(ts.timestamp()),
+                "open": float(row.open), "high": float(row.high),
+                "low":  float(row.low),  "close": float(row.close)}
+               for ts, row in df.iterrows()]
+    _chart_cache[key] = (now, candles)
+    return candles
 
 
 def _iter_events(path: Path) -> Iterable[dict[str, Any]]:
@@ -118,6 +141,21 @@ def create_app(journal_path: str | Path) -> FastAPI:
         if symbol and market and not items:
             raise HTTPException(status_code=404, detail="no regime data")
         return JSONResponse({"count": len(items), "regimes": items})
+
+    @app.get("/chart")
+    def chart(symbol: str = Query("BTC/USDT"),
+              timeframe: str = Query("1h"),
+              limit: int = Query(200, ge=20, le=1000),
+              exchange: str = Query("kraken")) -> JSONResponse:
+        try:
+            candles = _fetch_candles(exchange, symbol, timeframe, limit)
+            return JSONResponse({"symbol": symbol, "timeframe": timeframe,
+                                 "exchange": exchange, "candles": candles})
+        except Exception as exc:
+            return JSONResponse(
+                {"symbol": symbol, "timeframe": timeframe,
+                 "exchange": exchange, "candles": [],
+                 "error": str(exc)[:200]}, status_code=503)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:

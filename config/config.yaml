@@ -6,7 +6,7 @@ loop_interval_seconds: 60
 markets:
   crypto:
     enabled: true
-    exchange: binance
+    exchange: kraken        # kraken / binance / coinbase / etc. (ccxt id)
     paper: true             # true -> PaperBroker; false -> CcxtBroker (real money)
     base_currency: USDT     # quote currency for equity valuation
     symbols: [BTC/USDT, ETH/USDT, SOL/USDT]

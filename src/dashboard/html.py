@@ -105,8 +105,21 @@ INDEX_HTML = """<!doctype html>
   .welcome .emoji{font-size:30px;line-height:1}
   .welcome p{margin:0 0 4px}
   svg.spark{width:100%;height:70px;display:block;margin-top:12px}
+  .chart-controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .chart-controls .group{display:inline-flex;background:rgba(255,255,255,.04);
+    border:1px solid var(--panel-border);border-radius:10px;overflow:hidden}
+  .chart-controls button{background:transparent;border:0;color:var(--muted);
+    padding:6px 12px;font:inherit;font-size:13px;cursor:pointer;
+    transition:background .15s,color .15s}
+  .chart-controls button:hover{color:var(--text)}
+  .chart-controls button.active{background:rgba(92,242,193,.15);
+    color:var(--accent)}
+  #chart{width:100%;height:340px;margin-top:12px;border-radius:10px;
+    overflow:hidden;background:rgba(0,0,0,.2)}
+  .chart-status{font-size:12.5px;color:var(--muted);margin-top:8px}
   footer{margin-top:30px;color:var(--muted);font-size:12px;text-align:center}
 </style>
+<script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -156,6 +169,30 @@ INDEX_HTML = """<!doctype html>
   <div class="hint">A quick visual of how your account has moved during this session.</div>
   <svg class="spark" id="spark" viewBox="0 0 600 70" preserveAspectRatio="none"></svg>
 </section>
+
+<section class="card" style="margin-top:16px">
+  <h2>Live market chart</h2>
+  <div class="hint">A real-time view of the market itself. Each
+    <span class="pos">green</span> candle means the price went up during that
+    period; each <span class="neg">red</span> candle means it went down. The
+    thin lines (wicks) show the highest and lowest prices reached.</div>
+  <div class="chart-controls">
+    <div class="group" id="chart-symbols">
+      <button data-sym="BTC/USDT" class="active">BTC/USDT</button>
+      <button data-sym="ETH/USDT">ETH/USDT</button>
+      <button data-sym="SOL/USDT">SOL/USDT</button>
+    </div>
+    <div class="group" id="chart-timeframes">
+      <button data-tf="15m">15m</button>
+      <button data-tf="1h" class="active">1h</button>
+      <button data-tf="4h">4h</button>
+      <button data-tf="1d">1d</button>
+    </div>
+  </div>
+  <div id="chart"></div>
+  <div class="chart-status" id="chart-status">Loading chart&hellip;</div>
+</section>
+
 
 <section class="grid cols-2" style="margin-top:16px">
   <div class="card">
@@ -395,6 +432,82 @@ async function refresh(){
 }
 refresh();
 setInterval(refresh,5000);
+
+let chartSymbol='BTC/USDT', chartTf='1h';
+let chart=null, candleSeries=null;
+function initChart(){
+  if(chart||typeof LightweightCharts==='undefined') return;
+  const el=document.getElementById('chart');
+  chart=LightweightCharts.createChart(el,{
+    layout:{background:{type:'solid',color:'transparent'},textColor:'#8b95a8'},
+    grid:{vertLines:{color:'rgba(255,255,255,0.04)'},
+          horzLines:{color:'rgba(255,255,255,0.04)'}},
+    rightPriceScale:{borderColor:'rgba(255,255,255,0.06)'},
+    timeScale:{borderColor:'rgba(255,255,255,0.06)',timeVisible:true,
+               secondsVisible:false},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+    autoSize:true
+  });
+  candleSeries=chart.addCandlestickSeries({
+    upColor:'#4ade80',downColor:'#f87171',borderVisible:false,
+    wickUpColor:'#4ade80',wickDownColor:'#f87171'
+  });
+  window.addEventListener('resize',()=>chart.timeScale().fitContent());
+}
+async function loadChart(){
+  initChart();
+  if(!candleSeries){
+    document.getElementById('chart-status').textContent=
+      'Chart library failed to load (offline?)'; return;
+  }
+  const status=document.getElementById('chart-status');
+  status.textContent='Loading '+chartSymbol+' \\u00B7 '+chartTf+'\\u2026';
+  try{
+    const r=await fetch('/chart?symbol='+encodeURIComponent(chartSymbol)+
+      '&timeframe='+chartTf+'&limit=300');
+    const data=await r.json();
+    if(!data.candles||!data.candles.length){
+      status.textContent='No data: '+(data.error||'exchange unreachable');
+      candleSeries.setData([]); return;
+    }
+    candleSeries.setData(data.candles);
+    chart.timeScale().fitContent();
+    const last=data.candles[data.candles.length-1];
+    const first=data.candles[0];
+    const change=last.close-first.open;
+    const pct=first.open?(change/first.open)*100:0;
+    const cls=change>=0?'pos':'neg';
+    const sign=change>=0?'+':'';
+    status.innerHTML=chartSymbol+' \\u00B7 '+chartTf+
+      ' \\u00B7 last <b>'+fmtMoney(last.close)+'</b> '+
+      '<span class="'+cls+'">'+sign+fmt(pct,2)+'% over window</span> '+
+      '\\u00B7 '+data.candles.length+' candles \\u00B7 '+
+      (data.exchange||'kraken');
+  }catch(err){
+    status.textContent='Chart error: '+err;
+  }
+}
+function bindChartButtons(){
+  document.querySelectorAll('#chart-symbols button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      chartSymbol=b.dataset.sym;
+      document.querySelectorAll('#chart-symbols button')
+        .forEach(x=>x.classList.toggle('active',x===b));
+      loadChart();
+    });
+  });
+  document.querySelectorAll('#chart-timeframes button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      chartTf=b.dataset.tf;
+      document.querySelectorAll('#chart-timeframes button')
+        .forEach(x=>x.classList.toggle('active',x===b));
+      loadChart();
+    });
+  });
+}
+bindChartButtons();
+loadChart();
+setInterval(loadChart,30000);
 </script>
 </body>
 </html>
