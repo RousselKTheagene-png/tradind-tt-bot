@@ -7,7 +7,8 @@ markets:
   crypto:
     enabled: true
     exchange: binance
-    paper: true             # crypto live routing not wired yet
+    paper: true             # true -> PaperBroker; false -> CcxtBroker (real money)
+    base_currency: USDT     # quote currency for equity valuation
     symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
     timeframe: 1h
   stocks:
@@ -78,3 +79,11 @@ regime:
 monitoring:
   log_level: INFO
   journal_path: ./journal/trades.jsonl
+
+notifier:
+  enabled: false
+  events: [order, regime_flip, risk_block, error]
+  telegram:
+    enabled: false           # reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID from env
+  discord:
+    enabled: false           # reads DISCORD_WEBHOOK_URL from env

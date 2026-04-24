@@ -13,8 +13,9 @@ from .execution.base import Broker, Order, OrderType
 from .execution.paper_broker import PaperBroker
 from .execution.safety import ensure_live_safety
 from .intelligence.regime import RegimeClassifier
-from .monitoring.journal import TradeJournal
 from .monitoring.logger import configure_logging
+from .monitoring.notifier import build_notifier
+from .monitoring.sqlite_journal import open_journal
 from .risk.risk_manager import RiskLimits, RiskManager
 from .strategies.base import Side, Strategy
 from .strategies.bollinger_squeeze import BollingerSqueeze
@@ -74,14 +75,28 @@ def build_markets(cfg: dict, mode: str = "paper",
     crypto_cfg = cfg["markets"].get("crypto", {})
     if crypto_cfg.get("enabled"):
         from .data.crypto_provider import CryptoProvider
+        exch = crypto_cfg.get("exchange", "binance")
+        key_env = f"{exch.upper()}_API_KEY"
+        secret_env = f"{exch.upper()}_API_SECRET"
+        provider = CryptoProvider(
+            exchange=exch,
+            api_key=os.getenv(key_env, ""),
+            api_secret=os.getenv(secret_env, ""),
+        )
+        if _use_live_broker(mode, crypto_cfg):
+            from .execution.ccxt_broker import CcxtBroker
+            broker: Broker = CcxtBroker(
+                exchange=exch,
+                api_key=os.getenv(key_env, ""),
+                api_secret=os.getenv(secret_env, ""),
+                base_currency=crypto_cfg.get("base_currency", "USDT"),
+            )
+        else:
+            broker = PaperBroker(starting_cash=paper_starting_cash)
         markets.append({
             "name": "crypto",
-            "provider": CryptoProvider(
-                exchange=crypto_cfg.get("exchange", "binance"),
-                api_key=os.getenv("BINANCE_API_KEY", ""),
-                api_secret=os.getenv("BINANCE_API_SECRET", ""),
-            ),
-            "broker": PaperBroker(starting_cash=paper_starting_cash),
+            "provider": provider,
+            "broker": broker,
             "symbols": crypto_cfg["symbols"],
             "timeframe": crypto_cfg.get("timeframe", "1h"),
         })
@@ -152,7 +167,8 @@ def _total_equity(markets: list[dict]) -> float:
 def run(cfg: dict, mode: str, markets: list[dict] | None = None,
         loop_forever: bool = True) -> None:
     log = configure_logging(cfg["monitoring"]["log_level"])
-    journal = TradeJournal(cfg["monitoring"]["journal_path"])
+    journal = open_journal(cfg["monitoring"]["journal_path"])
+    notifier = build_notifier(cfg)
 
     strategies = build_strategies(cfg)
     if markets is None:
@@ -195,6 +211,7 @@ def run(cfg: dict, mode: str, markets: list[dict] | None = None,
                         "market": market["name"], "symbol": symbol,
                         "regime": current_regime, "price": last,
                     })
+                    notifier.on_regime_snapshot(market["name"], symbol, current_regime)
 
                     for strat in strategies:
                         sig = strat.generate_signal(symbol, ohlcv)
@@ -214,6 +231,7 @@ def run(cfg: dict, mode: str, markets: list[dict] | None = None,
                         if not ok:
                             log.warning(f"{symbol} {strat.name} blocked: {reason}")
                             journal.record("blocked", {"symbol": symbol, "reason": reason})
+                            notifier.on_risk_block(symbol, reason)
                             continue
 
                         stop, take = risk.default_stop_take(sig.price, sig.side.value)
@@ -229,12 +247,14 @@ def run(cfg: dict, mode: str, markets: list[dict] | None = None,
                         filled = broker.submit(order)
                         log.info(f"Submitted {filled.side} {filled.qty:.6f} {symbol} @ {filled.fill_price} "
                                  f"via {type(broker).__name__}")
-                        journal.record("order", {
+                        order_payload = {
                             "id": filled.id, "symbol": symbol, "side": filled.side,
                             "qty": filled.qty, "fill_price": filled.fill_price,
                             "status": filled.status.value, "strategy": strat.name,
                             "market": market["name"], "broker": type(broker).__name__,
-                        })
+                        }
+                        journal.record("order", order_payload)
+                        notifier.on_order(order_payload)
                         if filled.fill_price is not None:
                             risk.on_fill(_total_equity(markets))
 
@@ -249,6 +269,7 @@ def run(cfg: dict, mode: str, markets: list[dict] | None = None,
         except Exception as exc:  # don't crash the loop
             log.exception(f"Loop error: {exc}")
             journal.record("error", {"error": str(exc)})
+            notifier.on_error(str(exc))
 
         if not loop_forever:
             break
