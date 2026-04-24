@@ -12,14 +12,14 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Data / state
-data/
-logs/
+# Data / state (anchored to repo root so `src/data/` is NOT matched)
+/data/
+/logs/
+/journal/
 *.db
 *.sqlite
 *.parquet
 *.csv
-journal/
 
 # IDE
 .vscode/
