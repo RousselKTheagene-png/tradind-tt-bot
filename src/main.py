@@ -191,6 +191,10 @@ def run(cfg: dict, mode: str, markets: list[dict] | None = None,
                         broker.set_price(symbol, last)
 
                     current_regime = regime_filter.classify(ohlcv).value if regime_filter else None
+                    journal.record("regime_snapshot", {
+                        "market": market["name"], "symbol": symbol,
+                        "regime": current_regime, "price": last,
+                    })
 
                     for strat in strategies:
                         sig = strat.generate_signal(symbol, ohlcv)
@@ -233,6 +237,15 @@ def run(cfg: dict, mode: str, markets: list[dict] | None = None,
                         })
                         if filled.fill_price is not None:
                             risk.on_fill(_total_equity(markets))
+
+            journal.record("equity_snapshot", {
+                "equity": _total_equity(markets),
+                "brokers": [
+                    {"market": m["name"], "broker": type(m["broker"]).__name__,
+                     "equity": float(m["broker"].equity())}
+                    for m in markets
+                ],
+            })
         except Exception as exc:  # don't crash the loop
             log.exception(f"Loop error: {exc}")
             journal.record("error", {"error": str(exc)})
