@@ -13,6 +13,7 @@ import pandas as pd
 from ..execution.base import Order, OrderType
 from ..execution.cost_model import CostModel
 from ..execution.paper_broker import PaperBroker
+from ..intelligence.regime import RegimeClassifier
 from ..risk.risk_manager import RiskLimits, RiskManager
 from ..strategies.base import Side, Strategy
 from .metrics import PerformanceReport, compute_metrics
@@ -23,6 +24,8 @@ class BacktestResult:
     equity_curve: pd.Series
     trades: list[dict] = field(default_factory=list)
     report: PerformanceReport | None = None
+    regime_blocks: int = 0
+    regime_history: list[tuple[pd.Timestamp, str]] = field(default_factory=list)
 
 
 class BacktestEngine:
@@ -35,6 +38,7 @@ class BacktestEngine:
         warmup: int = 100,
         timeframe: str = "1h",
         cost_model: CostModel | None = None,
+        regime_filter: RegimeClassifier | None = None,
     ):
         self.strategy = strategy
         self.symbol = symbol
@@ -44,6 +48,7 @@ class BacktestEngine:
         self.cost_model = cost_model or CostModel()
         self.broker = PaperBroker(starting_cash=starting_cash, cost_model=self.cost_model)
         self.risk = RiskManager(starting_cash, risk_limits or RiskLimits())
+        self.regime_filter = regime_filter
         self._entry_price: float | None = None
         self._entry_qty: float = 0.0
 
@@ -69,6 +74,8 @@ class BacktestEngine:
         equity_samples: list[tuple[pd.Timestamp, float]] = []
         trade_pnls: list[float] = []
         trades: list[dict] = []
+        regime_history: list[tuple[pd.Timestamp, str]] = []
+        regime_blocks = 0
         pending_signal: Side | None = None
 
         for i in range(self.warmup, len(ohlcv) - 1):
@@ -102,7 +109,18 @@ class BacktestEngine:
             # Generate next signal from the closed bar.
             signal = self.strategy.generate_signal(self.symbol, window)
             if signal is not None and signal.side in (Side.BUY, Side.SELL):
-                pending_signal = signal.side
+                if self.regime_filter is not None:
+                    regime = self.regime_filter.classify(window).value
+                    regime_history.append((ohlcv.index[i], regime))
+                    # Only filter new entries. Always allow exits (risk control first).
+                    is_entry = (signal.side == Side.BUY and self._entry_qty == 0) or \
+                               (signal.side == Side.SELL and self._entry_qty == 0)
+                    if is_entry and not self.strategy.accepts_regime(regime):
+                        regime_blocks += 1
+                    else:
+                        pending_signal = signal.side
+                else:
+                    pending_signal = signal.side
 
             # Mark-to-market equity snapshot.
             self.broker.set_price(self.symbol, float(window["close"].iloc[-1]))
@@ -125,4 +143,10 @@ class BacktestEngine:
             name="equity",
         )
         report = compute_metrics(equity_curve, trade_pnls, self.timeframe)
-        return BacktestResult(equity_curve=equity_curve, trades=trades, report=report)
+        return BacktestResult(
+            equity_curve=equity_curve,
+            trades=trades,
+            report=report,
+            regime_blocks=regime_blocks,
+            regime_history=regime_history,
+        )

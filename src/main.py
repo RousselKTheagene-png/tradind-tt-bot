@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .execution.base import Order, OrderType
 from .execution.paper_broker import PaperBroker
+from .intelligence.regime import RegimeClassifier
 from .monitoring.journal import TradeJournal
 from .monitoring.logger import configure_logging
 from .risk.risk_manager import RiskLimits, RiskManager
@@ -86,6 +87,14 @@ def run(cfg: dict, mode: str) -> None:
     markets = build_markets(cfg)
     interval = cfg.get("loop_interval_seconds", 60)
 
+    regime_cfg = cfg.get("regime", {})
+    regime_filter: RegimeClassifier | None = None
+    if regime_cfg.get("enabled", True):
+        regime_filter = RegimeClassifier(
+            method=regime_cfg.get("method", "rules"),
+            adx_threshold=regime_cfg.get("adx_threshold", 25.0),
+        )
+
     if not markets:
         raise SystemExit("No markets enabled in config.")
 
@@ -103,9 +112,19 @@ def run(cfg: dict, mode: str) -> None:
                     last = float(ohlcv["close"].iloc[-1])
                     broker.set_price(symbol, last)
 
+                    current_regime = regime_filter.classify(ohlcv).value if regime_filter else None
+
                     for strat in strategies:
                         sig = strat.generate_signal(symbol, ohlcv)
                         if sig is None or sig.side == Side.FLAT:
+                            continue
+
+                        if current_regime is not None and not strat.accepts_regime(current_regime):
+                            log.info(f"{symbol} {strat.name} skipped in regime={current_regime}")
+                            journal.record("regime_block", {
+                                "symbol": symbol, "strategy": strat.name,
+                                "regime": current_regime, "side": sig.side.value,
+                            })
                             continue
 
                         ok, reason = risk.can_open(broker.equity())

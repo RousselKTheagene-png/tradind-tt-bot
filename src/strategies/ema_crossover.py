@@ -9,6 +9,8 @@ from .indicators import ema
 
 class EmaCrossover(Strategy):
     name = "ema_crossover"
+    # Trend-following: only fire in trending regimes.
+    tolerated_regimes = frozenset({"trending_up", "trending_down", "unknown"})
 
     def __init__(self, fast: int = 20, slow: int = 50, **kwargs):
         super().__init__(fast=fast, slow=slow, **kwargs)

@@ -9,6 +9,8 @@ from .indicators import rsi
 
 class RsiReversion(Strategy):
     name = "rsi_reversion"
+    # Mean-reversion: only fire in ranging regimes (and unknown as a fallback).
+    tolerated_regimes = frozenset({"ranging", "unknown"})
 
     def __init__(self, period: int = 14, oversold: float = 30, overbought: float = 70, **kwargs):
         super().__init__(period=period, oversold=oversold, overbought=overbought, **kwargs)

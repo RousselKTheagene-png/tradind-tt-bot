@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from ..data.crypto_provider import CryptoProvider
 from ..execution.cost_model import CostModel
+from ..intelligence.regime import RegimeClassifier
 from ..main import STRATEGY_REGISTRY
 from ..risk.risk_manager import RiskLimits
 from .engine import BacktestEngine
@@ -40,6 +41,9 @@ def main() -> None:
                         help="Per-trade fee in basis points (default 10 bps = 0.10%%)")
     parser.add_argument("--slippage-bps", type=float, default=5.0,
                         help="Per-fill slippage in basis points (default 5 bps = 0.05%%)")
+    parser.add_argument("--regime-filter", action="store_true",
+                        help="Only allow strategies to fire in their tolerated regimes")
+    parser.add_argument("--regime-method", choices=["rules", "kmeans"], default="rules")
     parser.add_argument("--params", default="{}",
                         help="JSON dict of strategy params, e.g. '{\"fast\":10}'")
     parser.add_argument("--csv", help="Optional path to a CSV with OHLCV instead of live fetch")
@@ -55,6 +59,8 @@ def main() -> None:
     else:
         ohlcv = _fetch_ohlcv(args.exchange, args.symbol, args.timeframe, args.limit)
 
+    regime_filter = RegimeClassifier(method=args.regime_method) if args.regime_filter else None
+
     engine = BacktestEngine(
         strategy=strategy,
         symbol=args.symbol,
@@ -63,15 +69,19 @@ def main() -> None:
         warmup=args.warmup,
         timeframe=args.timeframe,
         cost_model=CostModel(fee_bps=args.fee_bps, slippage_bps=args.slippage_bps),
+        regime_filter=regime_filter,
     )
     result = engine.run(ohlcv)
 
+    regime_tag = f"  Regime filter: {args.regime_method}" if args.regime_filter else ""
     print(f"\n=== Backtest: {args.strategy} on {args.symbol} {args.timeframe} ===")
     print(f"Bars: {len(ohlcv)}  Trades: {result.report.num_trades}  "
-          f"Fees: {args.fee_bps}bps  Slippage: {args.slippage_bps}bps")
+          f"Fees: {args.fee_bps}bps  Slippage: {args.slippage_bps}bps{regime_tag}")
     for k, v in result.report.as_dict().items():
         print(f"  {k:<20} {v}")
     print(f"  {'total_fees_paid':<20} {engine.broker.total_fees_paid:.4f}")
+    if args.regime_filter:
+        print(f"  {'regime_blocks':<20} {result.regime_blocks}")
 
 
 if __name__ == "__main__":
