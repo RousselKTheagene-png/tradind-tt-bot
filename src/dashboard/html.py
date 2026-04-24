@@ -116,7 +116,12 @@ INDEX_HTML = """<!doctype html>
     color:var(--accent)}
   #chart{width:100%;height:340px;margin-top:12px;border-radius:10px;
     overflow:hidden;background:rgba(0,0,0,.2)}
+  #rsi-chart{width:100%;height:120px;margin-top:6px;border-radius:10px;
+    overflow:hidden;background:rgba(0,0,0,.2);display:none}
+  #rsi-chart.show{display:block}
   .chart-status{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .legend-dot{display:inline-block;width:10px;height:10px;border-radius:2px;
+    margin-right:4px;vertical-align:middle}
   footer{margin-top:30px;color:var(--muted);font-size:12px;text-align:center}
 </style>
 <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
@@ -183,14 +188,35 @@ INDEX_HTML = """<!doctype html>
       <button data-sym="SOL/USDT">SOL/USDT</button>
     </div>
     <div class="group" id="chart-timeframes">
+      <button data-tf="1m">1m</button>
+      <button data-tf="5m">5m</button>
       <button data-tf="15m">15m</button>
+      <button data-tf="30m">30m</button>
       <button data-tf="1h" class="active">1h</button>
       <button data-tf="4h">4h</button>
       <button data-tf="1d">1d</button>
+      <button data-tf="1w">1w</button>
+    </div>
+    <div class="group" id="chart-indicators">
+      <button data-ind="ema20" class="active">EMA 20</button>
+      <button data-ind="ema50" class="active">EMA 50</button>
+      <button data-ind="bb">Bollinger</button>
+      <button data-ind="rsi">RSI</button>
+      <button data-ind="patterns" class="active">Patterns</button>
     </div>
   </div>
   <div id="chart"></div>
+  <div id="rsi-chart"></div>
   <div class="chart-status" id="chart-status">Loading chart&hellip;</div>
+  <div class="hint" style="margin-top:8px">
+    <span class="pos">&#9650; Buy</span> / <span class="neg">&#9660; Sell</span>
+    markers show what the bot did. Coloured circles flag candlestick patterns
+    (<b>green</b> = bullish setup, <b>red</b> = bearish, <b>grey</b> = doji /
+    indecision). Toggle <b>EMA</b>, <b>Bollinger</b>, or <b>RSI</b> above to
+    overlay common indicators &mdash; EMAs show trend direction, Bollinger
+    bands show volatility range, RSI flags overbought (&gt;70) or oversold
+    (&lt;30) conditions.
+  </div>
 </section>
 
 
@@ -435,24 +461,104 @@ setInterval(refresh,5000);
 
 let chartSymbol='BTC/USDT', chartTf='1h';
 let chart=null, candleSeries=null;
+let rsiChart=null, rsiSeries=null;
+const indSeries={};
+const indOn={ema20:true,ema50:true,bb:false,rsi:false,patterns:true};
+const IND_COLORS={ema20:'#5cf2c1',ema50:'#fbbf24',
+  bb_upper:'rgba(96,165,250,0.7)',bb_lower:'rgba(96,165,250,0.7)',
+  bb_mid:'rgba(96,165,250,0.35)'};
+function chartCfg(){return{
+  layout:{background:{type:'solid',color:'transparent'},textColor:'#8b95a8'},
+  grid:{vertLines:{color:'rgba(255,255,255,0.04)'},
+        horzLines:{color:'rgba(255,255,255,0.04)'}},
+  rightPriceScale:{borderColor:'rgba(255,255,255,0.06)'},
+  timeScale:{borderColor:'rgba(255,255,255,0.06)',timeVisible:true,
+             secondsVisible:false},
+  crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+  autoSize:true};}
 function initChart(){
   if(chart||typeof LightweightCharts==='undefined') return;
-  const el=document.getElementById('chart');
-  chart=LightweightCharts.createChart(el,{
-    layout:{background:{type:'solid',color:'transparent'},textColor:'#8b95a8'},
-    grid:{vertLines:{color:'rgba(255,255,255,0.04)'},
-          horzLines:{color:'rgba(255,255,255,0.04)'}},
-    rightPriceScale:{borderColor:'rgba(255,255,255,0.06)'},
-    timeScale:{borderColor:'rgba(255,255,255,0.06)',timeVisible:true,
-               secondsVisible:false},
-    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
-    autoSize:true
-  });
+  chart=LightweightCharts.createChart(document.getElementById('chart'),
+    chartCfg());
   candleSeries=chart.addCandlestickSeries({
     upColor:'#4ade80',downColor:'#f87171',borderVisible:false,
     wickUpColor:'#4ade80',wickDownColor:'#f87171'
   });
   window.addEventListener('resize',()=>chart.timeScale().fitContent());
+}
+function ensureRsiChart(){
+  const el=document.getElementById('rsi-chart');
+  if(rsiChart) return;
+  rsiChart=LightweightCharts.createChart(el,Object.assign(chartCfg(),{
+    rightPriceScale:{borderColor:'rgba(255,255,255,0.06)',
+      scaleMargins:{top:0.1,bottom:0.1}}}));
+  rsiSeries=rsiChart.addLineSeries({color:'#a78bfa',lineWidth:2,
+    priceLineVisible:false});
+  rsiSeries.createPriceLine({price:70,color:'rgba(248,113,113,0.5)',
+    lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'70'});
+  rsiSeries.createPriceLine({price:30,color:'rgba(74,222,128,0.5)',
+    lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'30'});
+  // sync time scales
+  chart.timeScale().subscribeVisibleLogicalRangeChange(r=>{
+    if(r&&rsiChart) rsiChart.timeScale().setVisibleLogicalRange(r);
+  });
+}
+function clearIndicator(key){
+  if(indSeries[key]&&chart){chart.removeSeries(indSeries[key]);
+    delete indSeries[key];}
+}
+function setLine(key,points,color,opts){
+  if(!points||!points.length){clearIndicator(key);return;}
+  if(!indSeries[key]){
+    indSeries[key]=chart.addLineSeries(Object.assign(
+      {color:color,lineWidth:2,priceLineVisible:false,lastValueVisible:false},
+      opts||{}));
+  }
+  indSeries[key].setData(points);
+}
+const TF_SECS={'1m':60,'5m':300,'15m':900,'30m':1800,
+  '1h':3600,'4h':14400,'1d':86400,'1w':604800};
+function signalMarkers(signals,first,last){
+  const step=TF_SECS[chartTf]||3600;
+  const byBucket={};
+  (signals||[]).forEach(s=>{
+    const bucket=Math.floor(s.time/step)*step;
+    if(bucket<first||bucket>last) return;
+    const key=bucket+'|'+s.side;
+    const cur=byBucket[key]||{time:bucket,side:s.side,qty:0,price:0,n:0};
+    cur.qty+=s.qty; cur.price+=s.price; cur.n+=1;
+    byBucket[key]=cur;
+  });
+  return Object.values(byBucket).map(b=>{
+    const avg=b.price/b.n;
+    const isBuy=(b.side||'').toLowerCase()==='buy';
+    return {time:b.time,
+      position:isBuy?'belowBar':'aboveBar',
+      color:isBuy?'#4ade80':'#f87171',
+      shape:isBuy?'arrowUp':'arrowDown',
+      text:(isBuy?'B ':'S ')+fmt(b.qty,4)+' @ '+fmtMoney(avg)};
+  });
+}
+const PATTERN_STYLE={
+  hammer:{color:'#4ade80',pos:'belowBar',short:'H'},
+  bull_engulfing:{color:'#4ade80',pos:'belowBar',short:'BE'},
+  shooting_star:{color:'#f87171',pos:'aboveBar',short:'SS'},
+  bear_engulfing:{color:'#f87171',pos:'aboveBar',short:'BE'},
+  doji:{color:'#8b95a8',pos:'aboveBar',short:'D'}
+};
+function patternMarkers(patterns,first,last){
+  const step=TF_SECS[chartTf]||3600;
+  const seen={};
+  return (patterns||[]).filter(p=>{
+    const t=Math.floor(p.time/step)*step;
+    if(t<first||t>last) return false;
+    const k=t+'|'+p.name; if(seen[k]) return false; seen[k]=1;
+    p._t=t; return true;
+  }).map(p=>{
+    const s=PATTERN_STYLE[p.name]||{color:'#8b95a8',pos:'aboveBar',short:'?'};
+    return {time:p._t,position:s.pos,color:s.color,shape:'circle',
+      text:s.short+' '+(p.label||p.name)};
+  });
 }
 async function loadChart(){
   initChart();
@@ -463,25 +569,76 @@ async function loadChart(){
   const status=document.getElementById('chart-status');
   status.textContent='Loading '+chartSymbol+' \\u00B7 '+chartTf+'\\u2026';
   try{
-    const r=await fetch('/chart?symbol='+encodeURIComponent(chartSymbol)+
+    const data=await j('/chart?symbol='+encodeURIComponent(chartSymbol)+
       '&timeframe='+chartTf+'&limit=300');
-    const data=await r.json();
     if(!data.candles||!data.candles.length){
       status.textContent='No data: '+(data.error||'exchange unreachable');
-      candleSeries.setData([]); return;
+      candleSeries.setData([]); candleSeries.setMarkers([]); return;
     }
     candleSeries.setData(data.candles);
     chart.timeScale().fitContent();
-    const last=data.candles[data.candles.length-1];
-    const first=data.candles[0];
-    const change=last.close-first.open;
-    const pct=first.open?(change/first.open)*100:0;
+    const first=data.candles[0].time, last=data.candles[data.candles.length-1].time;
+
+    // Indicators
+    const wanted=['ema20','ema50','bb','rsi'].filter(k=>indOn[k]);
+    let indCount=0;
+    if(wanted.length){
+      try{
+        const ir=await j('/indicators?symbol='+encodeURIComponent(chartSymbol)+
+          '&timeframe='+chartTf+'&limit=300&which='+wanted.join(','));
+        const ind=ir.indicators||{};
+        ['ema20','ema50','bb_upper','bb_mid','bb_lower'].forEach(k=>{
+          if(ind[k]){setLine(k,ind[k],IND_COLORS[k]); indCount++;}
+          else clearIndicator(k);
+        });
+        if(indOn.rsi&&ind.rsi){
+          ensureRsiChart();
+          rsiSeries.setData(ind.rsi);
+          document.getElementById('rsi-chart').classList.add('show');
+          indCount++;
+        }else{
+          document.getElementById('rsi-chart').classList.remove('show');
+        }
+      }catch(_){}
+    }
+    if(!indOn.ema20) clearIndicator('ema20');
+    if(!indOn.ema50) clearIndicator('ema50');
+    if(!indOn.bb){clearIndicator('bb_upper');clearIndicator('bb_mid');
+      clearIndicator('bb_lower');}
+    if(!indOn.rsi) document.getElementById('rsi-chart').classList.remove('show');
+
+    // Markers (signals + patterns)
+    let allMarkers=[];
+    try{
+      const sg=await j('/signals?symbol='+encodeURIComponent(chartSymbol)+
+        '&limit=500');
+      allMarkers=allMarkers.concat(signalMarkers(sg.signals||[],first,last));
+    }catch(_){}
+    let patCount=0;
+    if(indOn.patterns){
+      try{
+        const pr=await j('/patterns?symbol='+encodeURIComponent(chartSymbol)+
+          '&timeframe='+chartTf+'&limit=300&max_results=12');
+        const pm=patternMarkers(pr.patterns||[],first,last);
+        patCount=pm.length;
+        allMarkers=allMarkers.concat(pm);
+      }catch(_){}
+    }
+    allMarkers.sort((a,b)=>a.time-b.time);
+    candleSeries.setMarkers(allMarkers);
+
+    const lastC=data.candles[data.candles.length-1];
+    const firstC=data.candles[0];
+    const change=lastC.close-firstC.open;
+    const pct=firstC.open?(change/firstC.open)*100:0;
     const cls=change>=0?'pos':'neg';
     const sign=change>=0?'+':'';
+    const sigCount=allMarkers.length-patCount;
     status.innerHTML=chartSymbol+' \\u00B7 '+chartTf+
-      ' \\u00B7 last <b>'+fmtMoney(last.close)+'</b> '+
+      ' \\u00B7 last <b>'+fmtMoney(lastC.close)+'</b> '+
       '<span class="'+cls+'">'+sign+fmt(pct,2)+'% over window</span> '+
-      '\\u00B7 '+data.candles.length+' candles \\u00B7 '+
+      '\\u00B7 '+data.candles.length+' candles \\u00B7 '+sigCount+
+      ' signals \\u00B7 '+patCount+' patterns \\u00B7 '+
       (data.exchange||'kraken');
   }catch(err){
     status.textContent='Chart error: '+err;
@@ -501,6 +658,13 @@ function bindChartButtons(){
       chartTf=b.dataset.tf;
       document.querySelectorAll('#chart-timeframes button')
         .forEach(x=>x.classList.toggle('active',x===b));
+      loadChart();
+    });
+  });
+  document.querySelectorAll('#chart-indicators button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      const k=b.dataset.ind; indOn[k]=!indOn[k];
+      b.classList.toggle('active',indOn[k]);
       loadChart();
     });
   });

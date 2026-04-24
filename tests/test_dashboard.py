@@ -6,7 +6,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from src.dashboard.app import create_app, _compute_positions
+import pandas as pd
+
+from src.dashboard.app import _compute_positions, _detect_patterns, create_app
 
 
 def _write_journal(path: Path, events: list[dict]) -> None:
@@ -158,6 +160,67 @@ def test_regime_filter_by_symbol(tmp_path):
     client = TestClient(create_app(jpath))
     r = client.get("/regime?symbol=ETH/USDT&market=crypto")
     assert r.status_code == 404
+
+
+def test_signals_returns_filled_orders_with_unix_time(tmp_path):
+    jpath = tmp_path / "journal.jsonl"
+    _write_journal(jpath, _sample_events())
+    client = TestClient(create_app(jpath))
+    data = client.get("/signals").json()
+    assert data["count"] == 3
+    btc = [s for s in data["signals"] if s["symbol"] == "BTC/USDT"]
+    assert len(btc) == 2
+    assert all(s["side"] == "buy" for s in btc)
+    assert all(isinstance(s["time"], int) and s["time"] > 0 for s in btc)
+    assert btc[0]["price"] == 42000.0
+
+
+def test_signals_filters_by_symbol(tmp_path):
+    jpath = tmp_path / "journal.jsonl"
+    _write_journal(jpath, _sample_events())
+    client = TestClient(create_app(jpath))
+    data = client.get("/signals?symbol=ETH/USDT").json()
+    assert data["count"] == 1
+    assert data["signals"][0]["symbol"] == "ETH/USDT"
+
+
+def test_detect_patterns_finds_hammer():
+    idx = pd.date_range("2024-01-01", periods=2, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open":  [100.0, 100.0],
+         "high":  [101.0, 100.5],
+         "low":   [99.0,  95.0],
+         "close": [100.5, 100.2]},
+        index=idx,
+    )
+    found = {p["name"] for p in _detect_patterns(df)}
+    assert "hammer" in found
+
+
+def test_detect_patterns_finds_bullish_engulfing():
+    idx = pd.date_range("2024-01-01", periods=2, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open":  [105.0, 99.0],
+         "high":  [106.0, 110.0],
+         "low":   [100.0, 98.0],
+         "close": [101.0, 108.0]},
+        index=idx,
+    )
+    found = {p["name"] for p in _detect_patterns(df)}
+    assert "bull_engulfing" in found
+
+
+def test_detect_patterns_finds_doji():
+    idx = pd.date_range("2024-01-01", periods=2, freq="h", tz="UTC")
+    df = pd.DataFrame(
+        {"open":  [100.0, 100.0],
+         "high":  [101.0, 102.0],
+         "low":   [99.0,  98.0],
+         "close": [100.5, 100.05]},
+        index=idx,
+    )
+    found = {p["name"] for p in _detect_patterns(df)}
+    assert "doji" in found
 
 
 def test_index_page_served(tmp_path):
