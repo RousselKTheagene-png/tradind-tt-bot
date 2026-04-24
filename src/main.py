@@ -41,16 +41,38 @@ def build_strategies(cfg: dict) -> list[Strategy]:
     return out
 
 
-def build_provider(cfg: dict):
-    """Construct the crypto data provider (first market supported)."""
-    from .data.crypto_provider import CryptoProvider
+def build_markets(cfg: dict) -> list[dict]:
+    """Return a list of {provider, symbols, timeframe, name} dicts for each enabled market."""
+    markets: list[dict] = []
 
-    crypto_cfg = cfg["markets"]["crypto"]
-    return CryptoProvider(
-        exchange=crypto_cfg.get("exchange", "binance"),
-        api_key=os.getenv("BINANCE_API_KEY", ""),
-        api_secret=os.getenv("BINANCE_API_SECRET", ""),
-    )
+    crypto_cfg = cfg["markets"].get("crypto", {})
+    if crypto_cfg.get("enabled"):
+        from .data.crypto_provider import CryptoProvider
+        markets.append({
+            "name": "crypto",
+            "provider": CryptoProvider(
+                exchange=crypto_cfg.get("exchange", "binance"),
+                api_key=os.getenv("BINANCE_API_KEY", ""),
+                api_secret=os.getenv("BINANCE_API_SECRET", ""),
+            ),
+            "symbols": crypto_cfg["symbols"],
+            "timeframe": crypto_cfg.get("timeframe", "1h"),
+        })
+
+    stock_cfg = cfg["markets"].get("stocks", {})
+    if stock_cfg.get("enabled"):
+        from .data.stock_provider import StockProvider
+        markets.append({
+            "name": "stocks",
+            "provider": StockProvider(
+                api_key=os.getenv("ALPACA_API_KEY", ""),
+                api_secret=os.getenv("ALPACA_API_SECRET", ""),
+            ),
+            "symbols": stock_cfg["symbols"],
+            "timeframe": stock_cfg.get("timeframe", "15m"),
+        })
+
+    return markets
 
 
 def run(cfg: dict, mode: str) -> None:
@@ -61,50 +83,57 @@ def run(cfg: dict, mode: str) -> None:
     risk = RiskManager(starting_equity=broker.equity(),
                        limits=RiskLimits(**cfg["risk"]))
     strategies = build_strategies(cfg)
-    provider = build_provider(cfg)
-    symbols = cfg["markets"]["crypto"]["symbols"]
-    timeframe = cfg["markets"]["crypto"]["timeframe"]
+    markets = build_markets(cfg)
     interval = cfg.get("loop_interval_seconds", 60)
 
-    log.info(f"Starting bot in {mode} mode with {len(strategies)} strategies on {symbols}")
-    journal.record("start", {"mode": mode, "symbols": symbols})
+    if not markets:
+        raise SystemExit("No markets enabled in config.")
+
+    active = [(m["name"], m["symbols"]) for m in markets]
+    log.info(f"Starting bot in {mode} mode with {len(strategies)} strategies on {active}")
+    journal.record("start", {"mode": mode, "markets": active})
 
     while True:
         try:
-            for symbol in symbols:
-                ohlcv = provider.fetch_ohlcv(symbol, timeframe, limit=200)
-                last = float(ohlcv["close"].iloc[-1])
-                broker.set_price(symbol, last)
+            for market in markets:
+                provider = market["provider"]
+                timeframe = market["timeframe"]
+                for symbol in market["symbols"]:
+                    ohlcv = provider.fetch_ohlcv(symbol, timeframe, limit=200)
+                    last = float(ohlcv["close"].iloc[-1])
+                    broker.set_price(symbol, last)
 
-                for strat in strategies:
-                    sig = strat.generate_signal(symbol, ohlcv)
-                    if sig is None or sig.side == Side.FLAT:
-                        continue
+                    for strat in strategies:
+                        sig = strat.generate_signal(symbol, ohlcv)
+                        if sig is None or sig.side == Side.FLAT:
+                            continue
 
-                    ok, reason = risk.can_open(broker.equity())
-                    if not ok:
-                        log.warning(f"{symbol} {strat.name} blocked: {reason}")
-                        journal.record("blocked", {"symbol": symbol, "reason": reason})
-                        continue
+                        ok, reason = risk.can_open(broker.equity())
+                        if not ok:
+                            log.warning(f"{symbol} {strat.name} blocked: {reason}")
+                            journal.record("blocked", {"symbol": symbol, "reason": reason})
+                            continue
 
-                    stop, take = risk.default_stop_take(sig.price, sig.side.value)
-                    qty = risk.position_size(broker.equity(), sig.price, stop)
-                    if qty <= 0:
-                        continue
+                        stop, take = risk.default_stop_take(sig.price, sig.side.value)
+                        qty = risk.position_size(broker.equity(), sig.price, stop)
+                        if qty <= 0:
+                            continue
 
-                    order = Order(symbol=symbol, side=sig.side.value, qty=qty,
-                                  order_type=OrderType.MARKET,
-                                  stop_loss=stop, take_profit=take,
-                                  metadata={"strategy": strat.name, "reason": sig.reason})
-                    filled = broker.submit(order)
-                    log.info(f"Submitted {filled.side} {filled.qty:.6f} {symbol} @ {filled.fill_price}")
-                    journal.record("order", {
-                        "id": filled.id, "symbol": symbol, "side": filled.side,
-                        "qty": filled.qty, "fill_price": filled.fill_price,
-                        "status": filled.status.value, "strategy": strat.name,
-                    })
-                    if filled.fill_price is not None:
-                        risk.on_fill(broker.equity())
+                        order = Order(symbol=symbol, side=sig.side.value, qty=qty,
+                                      order_type=OrderType.MARKET,
+                                      stop_loss=stop, take_profit=take,
+                                      metadata={"strategy": strat.name, "market": market["name"],
+                                                "reason": sig.reason})
+                        filled = broker.submit(order)
+                        log.info(f"Submitted {filled.side} {filled.qty:.6f} {symbol} @ {filled.fill_price}")
+                        journal.record("order", {
+                            "id": filled.id, "symbol": symbol, "side": filled.side,
+                            "qty": filled.qty, "fill_price": filled.fill_price,
+                            "status": filled.status.value, "strategy": strat.name,
+                            "market": market["name"],
+                        })
+                        if filled.fill_price is not None:
+                            risk.on_fill(broker.equity())
         except Exception as exc:  # don't crash the loop
             log.exception(f"Loop error: {exc}")
             journal.record("error", {"error": str(exc)})
