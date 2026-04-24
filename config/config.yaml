@@ -17,6 +17,7 @@ markets:
   forex:
     enabled: false
     broker: oanda
+    environment: practice   # practice | live
     symbols: [EUR_USD, GBP_USD, USD_JPY]
     timeframe: 15m
 

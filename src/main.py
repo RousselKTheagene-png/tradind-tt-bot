@@ -79,6 +79,20 @@ def build_markets(cfg: dict) -> list[dict]:
             "timeframe": stock_cfg.get("timeframe", "15m"),
         })
 
+    forex_cfg = cfg["markets"].get("forex", {})
+    if forex_cfg.get("enabled"):
+        from .data.forex_provider import ForexProvider
+        markets.append({
+            "name": "forex",
+            "provider": ForexProvider(
+                api_key=os.getenv("OANDA_API_KEY", ""),
+                account_id=os.getenv("OANDA_ACCOUNT_ID", ""),
+                environment=forex_cfg.get("environment", "practice"),
+            ),
+            "symbols": forex_cfg["symbols"],
+            "timeframe": forex_cfg.get("timeframe", "15m"),
+        })
+
     return markets
 
 
