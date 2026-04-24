@@ -9,8 +9,9 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from .execution.base import Order, OrderType
+from .execution.base import Broker, Order, OrderType
 from .execution.paper_broker import PaperBroker
+from .execution.safety import ensure_live_safety
 from .intelligence.regime import RegimeClassifier
 from .monitoring.journal import TradeJournal
 from .monitoring.logger import configure_logging
@@ -48,8 +49,26 @@ def build_strategies(cfg: dict) -> list[Strategy]:
     return out
 
 
-def build_markets(cfg: dict) -> list[dict]:
-    """Return a list of {provider, symbols, timeframe, name} dicts for each enabled market."""
+def _use_live_broker(mode: str, market_cfg: dict) -> bool:
+    """In ``live`` mode we route to a real broker adapter; otherwise PaperBroker.
+
+    A market can still opt out of live routing by setting ``paper: true``.
+    """
+    if mode != "live":
+        return False
+    return bool(market_cfg.get("paper", True) is False)
+
+
+def build_markets(cfg: dict, mode: str = "paper",
+                  paper_starting_cash: float = 10_000.0) -> list[dict]:
+    """Return a list of {name, provider, broker, symbols, timeframe} dicts.
+
+    Each enabled market is paired with its own broker so order routing is
+    per-market. In ``paper`` mode every market uses a ``PaperBroker``. In
+    ``live`` mode, markets with ``paper: false`` in their config use the real
+    adapter (Alpaca for stocks, OANDA for forex); unsupported live markets
+    (crypto today) fall back to ``PaperBroker``.
+    """
     markets: list[dict] = []
 
     crypto_cfg = cfg["markets"].get("crypto", {})
@@ -62,6 +81,7 @@ def build_markets(cfg: dict) -> list[dict]:
                 api_key=os.getenv("BINANCE_API_KEY", ""),
                 api_secret=os.getenv("BINANCE_API_SECRET", ""),
             ),
+            "broker": PaperBroker(starting_cash=paper_starting_cash),
             "symbols": crypto_cfg["symbols"],
             "timeframe": crypto_cfg.get("timeframe", "1h"),
         })
@@ -69,12 +89,23 @@ def build_markets(cfg: dict) -> list[dict]:
     stock_cfg = cfg["markets"].get("stocks", {})
     if stock_cfg.get("enabled"):
         from .data.stock_provider import StockProvider
-        markets.append({
-            "name": "stocks",
-            "provider": StockProvider(
+        provider = StockProvider(
+            api_key=os.getenv("ALPACA_API_KEY", ""),
+            api_secret=os.getenv("ALPACA_API_SECRET", ""),
+        )
+        if _use_live_broker(mode, stock_cfg):
+            from .execution.alpaca_broker import AlpacaBroker
+            broker: Broker = AlpacaBroker(
                 api_key=os.getenv("ALPACA_API_KEY", ""),
                 api_secret=os.getenv("ALPACA_API_SECRET", ""),
-            ),
+                paper=stock_cfg.get("paper", True),
+            )
+        else:
+            broker = PaperBroker(starting_cash=paper_starting_cash)
+        markets.append({
+            "name": "stocks",
+            "provider": provider,
+            "broker": broker,
             "symbols": stock_cfg["symbols"],
             "timeframe": stock_cfg.get("timeframe", "15m"),
         })
@@ -82,13 +113,24 @@ def build_markets(cfg: dict) -> list[dict]:
     forex_cfg = cfg["markets"].get("forex", {})
     if forex_cfg.get("enabled"):
         from .data.forex_provider import ForexProvider
-        markets.append({
-            "name": "forex",
-            "provider": ForexProvider(
+        provider = ForexProvider(
+            api_key=os.getenv("OANDA_API_KEY", ""),
+            account_id=os.getenv("OANDA_ACCOUNT_ID", ""),
+            environment=forex_cfg.get("environment", "practice"),
+        )
+        if _use_live_broker(mode, forex_cfg):
+            from .execution.oanda_broker import OandaBroker
+            broker = OandaBroker(
                 api_key=os.getenv("OANDA_API_KEY", ""),
                 account_id=os.getenv("OANDA_ACCOUNT_ID", ""),
                 environment=forex_cfg.get("environment", "practice"),
-            ),
+            )
+        else:
+            broker = PaperBroker(starting_cash=paper_starting_cash)
+        markets.append({
+            "name": "forex",
+            "provider": provider,
+            "broker": broker,
             "symbols": forex_cfg["symbols"],
             "timeframe": forex_cfg.get("timeframe", "15m"),
         })
@@ -96,15 +138,25 @@ def build_markets(cfg: dict) -> list[dict]:
     return markets
 
 
-def run(cfg: dict, mode: str) -> None:
+def _total_equity(markets: list[dict]) -> float:
+    """Sum equity across every market's broker."""
+    total = 0.0
+    for m in markets:
+        try:
+            total += float(m["broker"].equity())
+        except Exception:
+            continue
+    return total
+
+
+def run(cfg: dict, mode: str, markets: list[dict] | None = None,
+        loop_forever: bool = True) -> None:
     log = configure_logging(cfg["monitoring"]["log_level"])
     journal = TradeJournal(cfg["monitoring"]["journal_path"])
 
-    broker = PaperBroker(starting_cash=10_000.0)
-    risk = RiskManager(starting_equity=broker.equity(),
-                       limits=RiskLimits(**cfg["risk"]))
     strategies = build_strategies(cfg)
-    markets = build_markets(cfg)
+    if markets is None:
+        markets = build_markets(cfg, mode=mode)
     interval = cfg.get("loop_interval_seconds", 60)
 
     regime_cfg = cfg.get("regime", {})
@@ -118,7 +170,11 @@ def run(cfg: dict, mode: str) -> None:
     if not markets:
         raise SystemExit("No markets enabled in config.")
 
-    active = [(m["name"], m["symbols"]) for m in markets]
+    starting_equity = _total_equity(markets)
+    risk = RiskManager(starting_equity=starting_equity,
+                       limits=RiskLimits(**cfg["risk"]))
+
+    active = [(m["name"], m["symbols"], type(m["broker"]).__name__) for m in markets]
     log.info(f"Starting bot in {mode} mode with {len(strategies)} strategies on {active}")
     journal.record("start", {"mode": mode, "markets": active})
 
@@ -126,11 +182,13 @@ def run(cfg: dict, mode: str) -> None:
         try:
             for market in markets:
                 provider = market["provider"]
+                broker: Broker = market["broker"]
                 timeframe = market["timeframe"]
                 for symbol in market["symbols"]:
                     ohlcv = provider.fetch_ohlcv(symbol, timeframe, limit=200)
                     last = float(ohlcv["close"].iloc[-1])
-                    broker.set_price(symbol, last)
+                    if isinstance(broker, PaperBroker):
+                        broker.set_price(symbol, last)
 
                     current_regime = regime_filter.classify(ohlcv).value if regime_filter else None
 
@@ -147,14 +205,15 @@ def run(cfg: dict, mode: str) -> None:
                             })
                             continue
 
-                        ok, reason = risk.can_open(broker.equity())
+                        equity = _total_equity(markets)
+                        ok, reason = risk.can_open(equity)
                         if not ok:
                             log.warning(f"{symbol} {strat.name} blocked: {reason}")
                             journal.record("blocked", {"symbol": symbol, "reason": reason})
                             continue
 
                         stop, take = risk.default_stop_take(sig.price, sig.side.value)
-                        qty = risk.position_size(broker.equity(), sig.price, stop)
+                        qty = risk.position_size(equity, sig.price, stop)
                         if qty <= 0:
                             continue
 
@@ -164,19 +223,22 @@ def run(cfg: dict, mode: str) -> None:
                                       metadata={"strategy": strat.name, "market": market["name"],
                                                 "reason": sig.reason})
                         filled = broker.submit(order)
-                        log.info(f"Submitted {filled.side} {filled.qty:.6f} {symbol} @ {filled.fill_price}")
+                        log.info(f"Submitted {filled.side} {filled.qty:.6f} {symbol} @ {filled.fill_price} "
+                                 f"via {type(broker).__name__}")
                         journal.record("order", {
                             "id": filled.id, "symbol": symbol, "side": filled.side,
                             "qty": filled.qty, "fill_price": filled.fill_price,
                             "status": filled.status.value, "strategy": strat.name,
-                            "market": market["name"],
+                            "market": market["name"], "broker": type(broker).__name__,
                         })
                         if filled.fill_price is not None:
-                            risk.on_fill(broker.equity())
+                            risk.on_fill(_total_equity(markets))
         except Exception as exc:  # don't crash the loop
             log.exception(f"Loop error: {exc}")
             journal.record("error", {"error": str(exc)})
 
+        if not loop_forever:
+            break
         time.sleep(interval)
 
 
@@ -188,10 +250,8 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    if args.mode == "live":
-        # Extra safety gate before real money
-        cfg["mode"] = "live"
-        raise SystemExit("Live mode not wired up yet. Use paper mode.")
+    cfg["mode"] = args.mode
+    ensure_live_safety(cfg)
     run(cfg, mode=args.mode)
 
 

@@ -7,19 +7,27 @@ markets:
   crypto:
     enabled: true
     exchange: binance
+    paper: true             # crypto live routing not wired yet
     symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
     timeframe: 1h
   stocks:
     enabled: false
     broker: alpaca
+    paper: true             # true -> Alpaca paper endpoint; false -> real money
     symbols: [SPY, AAPL, NVDA]
     timeframe: 15m
   forex:
     enabled: false
     broker: oanda
-    environment: practice   # practice | live
+    paper: true             # true -> PaperBroker; false -> OandaBroker
+    environment: practice   # practice | live (only used when paper: false)
     symbols: [EUR_USD, GBP_USD, USD_JPY]
     timeframe: 15m
+
+live_safety:
+  # Must be explicitly set to true AND env var TRADING_BOT_ALLOW_REAL_MONEY=I_UNDERSTAND
+  # before any market with paper: false and non-practice endpoint can trade.
+  real_money_confirmed: false
 
 strategies:
   - name: ema_crossover
