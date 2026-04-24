@@ -1,0 +1,131 @@
+"""Main entry point. Wires data -> strategies -> risk -> execution -> journal."""
+from __future__ import annotations
+
+import argparse
+import os
+import time
+from pathlib import Path
+
+import yaml
+from dotenv import load_dotenv
+
+from .execution.base import Order, OrderType
+from .execution.paper_broker import PaperBroker
+from .monitoring.journal import TradeJournal
+from .monitoring.logger import configure_logging
+from .risk.risk_manager import RiskLimits, RiskManager
+from .strategies.base import Side, Strategy
+from .strategies.ema_crossover import EmaCrossover
+from .strategies.rsi_reversion import RsiReversion
+
+STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
+    "ema_crossover": EmaCrossover,
+    "rsi_reversion": RsiReversion,
+}
+
+
+def load_config(path: str | Path) -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def build_strategies(cfg: dict) -> list[Strategy]:
+    out: list[Strategy] = []
+    for entry in cfg.get("strategies", []):
+        if not entry.get("enabled", True):
+            continue
+        klass = STRATEGY_REGISTRY.get(entry["name"])
+        if klass is None:
+            continue
+        out.append(klass(**entry.get("params", {})))
+    return out
+
+
+def build_provider(cfg: dict):
+    """Construct the crypto data provider (first market supported)."""
+    from .data.crypto_provider import CryptoProvider
+
+    crypto_cfg = cfg["markets"]["crypto"]
+    return CryptoProvider(
+        exchange=crypto_cfg.get("exchange", "binance"),
+        api_key=os.getenv("BINANCE_API_KEY", ""),
+        api_secret=os.getenv("BINANCE_API_SECRET", ""),
+    )
+
+
+def run(cfg: dict, mode: str) -> None:
+    log = configure_logging(cfg["monitoring"]["log_level"])
+    journal = TradeJournal(cfg["monitoring"]["journal_path"])
+
+    broker = PaperBroker(starting_cash=10_000.0)
+    risk = RiskManager(starting_equity=broker.equity(),
+                       limits=RiskLimits(**cfg["risk"]))
+    strategies = build_strategies(cfg)
+    provider = build_provider(cfg)
+    symbols = cfg["markets"]["crypto"]["symbols"]
+    timeframe = cfg["markets"]["crypto"]["timeframe"]
+    interval = cfg.get("loop_interval_seconds", 60)
+
+    log.info(f"Starting bot in {mode} mode with {len(strategies)} strategies on {symbols}")
+    journal.record("start", {"mode": mode, "symbols": symbols})
+
+    while True:
+        try:
+            for symbol in symbols:
+                ohlcv = provider.fetch_ohlcv(symbol, timeframe, limit=200)
+                last = float(ohlcv["close"].iloc[-1])
+                broker.set_price(symbol, last)
+
+                for strat in strategies:
+                    sig = strat.generate_signal(symbol, ohlcv)
+                    if sig is None or sig.side == Side.FLAT:
+                        continue
+
+                    ok, reason = risk.can_open(broker.equity())
+                    if not ok:
+                        log.warning(f"{symbol} {strat.name} blocked: {reason}")
+                        journal.record("blocked", {"symbol": symbol, "reason": reason})
+                        continue
+
+                    stop, take = risk.default_stop_take(sig.price, sig.side.value)
+                    qty = risk.position_size(broker.equity(), sig.price, stop)
+                    if qty <= 0:
+                        continue
+
+                    order = Order(symbol=symbol, side=sig.side.value, qty=qty,
+                                  order_type=OrderType.MARKET,
+                                  stop_loss=stop, take_profit=take,
+                                  metadata={"strategy": strat.name, "reason": sig.reason})
+                    filled = broker.submit(order)
+                    log.info(f"Submitted {filled.side} {filled.qty:.6f} {symbol} @ {filled.fill_price}")
+                    journal.record("order", {
+                        "id": filled.id, "symbol": symbol, "side": filled.side,
+                        "qty": filled.qty, "fill_price": filled.fill_price,
+                        "status": filled.status.value, "strategy": strat.name,
+                    })
+                    if filled.fill_price is not None:
+                        risk.on_fill(broker.equity())
+        except Exception as exc:  # don't crash the loop
+            log.exception(f"Loop error: {exc}")
+            journal.record("error", {"error": str(exc)})
+
+        time.sleep(interval)
+
+
+def main() -> None:
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Multi-market trading bot")
+    parser.add_argument("--mode", choices=["paper", "live"], default="paper")
+    parser.add_argument("--config", default="config/config.yaml")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    if args.mode == "live":
+        # Extra safety gate before real money
+        cfg["mode"] = "live"
+        raise SystemExit("Live mode not wired up yet. Use paper mode.")
+    run(cfg, mode=args.mode)
+
+
+if __name__ == "__main__":
+    main()

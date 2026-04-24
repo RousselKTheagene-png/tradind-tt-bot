@@ -1,0 +1,46 @@
+# Default bot configuration
+mode: paper              # paper | live
+base_currency: USD
+loop_interval_seconds: 60
+
+markets:
+  crypto:
+    enabled: true
+    exchange: binance
+    symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
+    timeframe: 1h
+  stocks:
+    enabled: false
+    broker: alpaca
+    symbols: [SPY, AAPL, NVDA]
+    timeframe: 15m
+  forex:
+    enabled: false
+    broker: oanda
+    symbols: [EUR_USD, GBP_USD, USD_JPY]
+    timeframe: 15m
+
+strategies:
+  - name: ema_crossover
+    enabled: true
+    params:
+      fast: 20
+      slow: 50
+  - name: rsi_reversion
+    enabled: true
+    params:
+      period: 14
+      oversold: 30
+      overbought: 70
+
+risk:
+  max_risk_per_trade_pct: 1.0
+  max_daily_loss_pct: 3.0
+  max_open_positions: 5
+  max_drawdown_pct: 15.0
+  default_stop_loss_pct: 2.0
+  default_take_profit_pct: 4.0
+
+monitoring:
+  log_level: INFO
+  journal_path: ./journal/trades.jsonl
