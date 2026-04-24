@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ..execution.base import Order, OrderType
+from ..execution.cost_model import CostModel
 from ..execution.paper_broker import PaperBroker
 from ..risk.risk_manager import RiskLimits, RiskManager
 from ..strategies.base import Side, Strategy
@@ -33,13 +34,15 @@ class BacktestEngine:
         risk_limits: RiskLimits | None = None,
         warmup: int = 100,
         timeframe: str = "1h",
+        cost_model: CostModel | None = None,
     ):
         self.strategy = strategy
         self.symbol = symbol
         self.starting_cash = starting_cash
         self.warmup = warmup
         self.timeframe = timeframe
-        self.broker = PaperBroker(starting_cash=starting_cash)
+        self.cost_model = cost_model or CostModel()
+        self.broker = PaperBroker(starting_cash=starting_cash, cost_model=self.cost_model)
         self.risk = RiskManager(starting_cash, risk_limits or RiskLimits())
         self._entry_price: float | None = None
         self._entry_qty: float = 0.0

@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 
 from ..data.crypto_provider import CryptoProvider
+from ..execution.cost_model import CostModel
 from ..main import STRATEGY_REGISTRY
 from ..risk.risk_manager import RiskLimits
 from .engine import BacktestEngine
@@ -35,6 +36,10 @@ def main() -> None:
     parser.add_argument("--cash", type=float, default=10_000.0)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--risk-per-trade", type=float, default=1.0)
+    parser.add_argument("--fee-bps", type=float, default=10.0,
+                        help="Per-trade fee in basis points (default 10 bps = 0.10%%)")
+    parser.add_argument("--slippage-bps", type=float, default=5.0,
+                        help="Per-fill slippage in basis points (default 5 bps = 0.05%%)")
     parser.add_argument("--params", default="{}",
                         help="JSON dict of strategy params, e.g. '{\"fast\":10}'")
     parser.add_argument("--csv", help="Optional path to a CSV with OHLCV instead of live fetch")
@@ -57,13 +62,16 @@ def main() -> None:
         risk_limits=RiskLimits(max_risk_per_trade_pct=args.risk_per_trade),
         warmup=args.warmup,
         timeframe=args.timeframe,
+        cost_model=CostModel(fee_bps=args.fee_bps, slippage_bps=args.slippage_bps),
     )
     result = engine.run(ohlcv)
 
     print(f"\n=== Backtest: {args.strategy} on {args.symbol} {args.timeframe} ===")
-    print(f"Bars: {len(ohlcv)}  Trades: {result.report.num_trades}")
+    print(f"Bars: {len(ohlcv)}  Trades: {result.report.num_trades}  "
+          f"Fees: {args.fee_bps}bps  Slippage: {args.slippage_bps}bps")
     for k, v in result.report.as_dict().items():
         print(f"  {k:<20} {v}")
+    print(f"  {'total_fees_paid':<20} {engine.broker.total_fees_paid:.4f}")
 
 
 if __name__ == "__main__":

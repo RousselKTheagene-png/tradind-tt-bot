@@ -5,14 +5,18 @@ import uuid
 from datetime import datetime, timezone
 
 from .base import Broker, Order, OrderStatus, OrderType, Position
+from .cost_model import CostModel
 
 
 class PaperBroker(Broker):
-    def __init__(self, starting_cash: float = 10_000.0):
+    def __init__(self, starting_cash: float = 10_000.0,
+                 cost_model: CostModel | None = None):
         self.cash = starting_cash
+        self.cost_model = cost_model or CostModel()
         self._positions: dict[str, Position] = {}
         self._orders: dict[str, Order] = {}
         self._last_prices: dict[str, float] = {}
+        self.total_fees_paid: float = 0.0
 
     def set_price(self, symbol: str, price: float) -> None:
         """Feed the broker the latest market price so it can fill orders."""
@@ -38,13 +42,16 @@ class PaperBroker(Broker):
                 return order
             fill = order.limit_price
 
+        fill = self.cost_model.apply_slippage(fill, order.side)
+        fee = self.cost_model.fee(fill, order.qty)
         cost = fill * order.qty
+
         if order.side == "buy":
-            if cost > self.cash:
+            if cost + fee > self.cash:
                 order.status = OrderStatus.REJECTED
                 self._orders[order.id] = order
                 return order
-            self.cash -= cost
+            self.cash -= cost + fee
             pos = self._positions.get(order.symbol)
             if pos is None:
                 self._positions[order.symbol] = Position(order.symbol, order.qty, fill)
@@ -58,14 +65,16 @@ class PaperBroker(Broker):
                 order.status = OrderStatus.REJECTED
                 self._orders[order.id] = order
                 return order
-            self.cash += cost
+            self.cash += cost - fee
             pos.qty -= order.qty
             if pos.qty == 0:
                 del self._positions[order.symbol]
 
+        self.total_fees_paid += fee
         order.status = OrderStatus.FILLED
         order.fill_price = fill
         order.filled_at = datetime.now(timezone.utc)
+        order.metadata = {**order.metadata, "fee": fee}
         self._orders[order.id] = order
         return order
 
