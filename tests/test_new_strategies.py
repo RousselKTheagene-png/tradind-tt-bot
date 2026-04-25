@@ -9,6 +9,7 @@ from src.strategies.base import Side
 from src.strategies.bollinger_squeeze import BollingerSqueeze
 from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.macd_divergence import MacdDivergence
+from src.strategies.supertrend import Supertrend
 
 
 def _ohlcv_from_close(close: np.ndarray) -> pd.DataFrame:
@@ -23,7 +24,8 @@ def _ohlcv_from_close(close: np.ndarray) -> pd.DataFrame:
 # --- Registry ----------------------------------------------------------------
 
 def test_strategies_registered():
-    for name in ("bollinger_squeeze", "macd_divergence", "donchian_breakout"):
+    for name in ("bollinger_squeeze", "macd_divergence",
+                 "donchian_breakout", "supertrend"):
         assert name in STRATEGY_REGISTRY
 
 
@@ -168,3 +170,96 @@ def test_donchian_breakout_regime_preferences():
 def test_donchian_breakout_short_series_returns_none():
     df = _ohlcv_from_close(np.full(10, 100.0))
     assert DonchianBreakout().generate_signal("X", df) is None
+
+
+# --- Supertrend -------------------------------------------------------------
+
+def _ohlcv_with_range(close: np.ndarray, range_pct: float = 0.005) -> pd.DataFrame:
+    """Like ``_ohlcv_from_close`` but with a configurable high/low spread so
+    ATR is non-trivial."""
+    n = len(close)
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h", tz="UTC")
+    high = close * (1 + range_pct)
+    low = close * (1 - range_pct)
+    return pd.DataFrame({"open": close, "high": high, "low": low,
+                         "close": close, "volume": np.ones(n)}, index=idx)
+
+
+def test_supertrend_fires_buy_on_flip_up():
+    # Long downtrend (locks Supertrend to -1), brief flat phase, then a single
+    # sharp up-bar at the end forces the flip on the last bar.
+    down = np.linspace(100, 80, 60)
+    flat = np.full(8, 80.0)
+    breakout = np.array([90.0])
+    close = np.concatenate([down, flat, breakout])
+    df = _ohlcv_with_range(close, range_pct=0.004)
+
+    strat = Supertrend(factor=3.0, period=7, use_trend_filter=False)
+    sig = strat.generate_signal("X", df)
+    assert sig is not None
+    assert sig.side == Side.BUY
+    assert sig.metadata["stop_loss"] < sig.price
+    assert sig.metadata["take_profit"] > sig.price
+    assert sig.metadata["rr_ratio"] == 2.0
+
+
+def test_supertrend_fires_sell_on_flip_down_when_shorts_allowed():
+    up = np.linspace(80, 100, 60)
+    flat = np.full(8, 100.0)
+    crash = np.array([90.0])
+    close = np.concatenate([up, flat, crash])
+    df = _ohlcv_with_range(close, range_pct=0.004)
+
+    strat = Supertrend(factor=3.0, period=7, use_trend_filter=False,
+                       allow_shorts=True)
+    sig = strat.generate_signal("X", df)
+    assert sig is not None
+    assert sig.side == Side.SELL
+    assert sig.metadata["stop_loss"] > sig.price
+    assert sig.metadata["take_profit"] < sig.price
+
+
+def test_supertrend_blocks_shorts_by_default():
+    up = np.linspace(80, 100, 60)
+    flat = np.full(8, 100.0)
+    crash = np.array([90.0])
+    close = np.concatenate([up, flat, crash])
+    df = _ohlcv_with_range(close, range_pct=0.004)
+
+    strat = Supertrend(factor=3.0, period=7, use_trend_filter=False)
+    assert strat.generate_signal("X", df) is None
+
+
+def test_supertrend_silent_on_steady_trend():
+    # Pure uptrend with no flip in the lookback window.
+    close = np.linspace(100, 130, 250)
+    df = _ohlcv_with_range(close, range_pct=0.003)
+    strat = Supertrend(factor=3.0, period=7, use_trend_filter=False)
+    assert strat.generate_signal("X", df) is None
+
+
+def test_supertrend_trend_filter_blocks_long_below_ema():
+    # Downtrend then a flat phase and a single up-bar that flips Supertrend up
+    # but stays well below EMA(200), so the trend filter must veto the long.
+    down = np.linspace(120, 80, 220)
+    flat = np.full(8, 80.0)
+    breakout = np.array([85.0])
+    close = np.concatenate([down, flat, breakout])
+    df = _ohlcv_with_range(close, range_pct=0.004)
+
+    strat = Supertrend(factor=3.0, period=7, use_trend_filter=True,
+                       trend_ema=200)
+    assert strat.generate_signal("X", df) is None
+
+
+def test_supertrend_regime_preferences():
+    s = Supertrend()
+    assert s.accepts_regime("trending_up")
+    assert s.accepts_regime("trending_down")
+    assert s.accepts_regime("high_volatility")
+    assert not s.accepts_regime("ranging")
+
+
+def test_supertrend_short_series_returns_none():
+    df = _ohlcv_with_range(np.full(50, 100.0))
+    assert Supertrend().generate_signal("X", df) is None

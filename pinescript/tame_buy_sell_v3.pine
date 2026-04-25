@@ -1,0 +1,250 @@
+//@version=5
+// =============================================================================
+//  Tame Buy-Sell v3 — beginner-friendly Supertrend strategy
+//  Upgrades over v2 (and the original v2-Pine "Tame buy-sell"):
+//   * Pine v5 syntax (no more deprecated calls)
+//   * Risk-% position sizing  (1R = configurable % of equity)
+//   * Initial ATR stop  →  break-even at +1R  →  ATR-trail after +1R
+//   * Confluence filters: 200-EMA trend, optional higher-timeframe 200-EMA,
+//     RSI(14) > 50 for longs / < 50 for shorts, ADX > threshold, volume spike
+//   * Session filter (skip overnight / weekend bars, optional weekday mask)
+//   * On-chart "reason" labels for every entry, live SL/TP/trail lines, and
+//     an info dashboard so a beginner can read the trade plan at a glance
+//   * Alerts for entry/exit/break-even/trail wired up for webhooks
+// =============================================================================
+
+strategy("Tame Buy-Sell v3 (Beginner-Friendly Supertrend)", overlay=true,
+     pyramiding=0, initial_capital=10000,
+     default_qty_type=strategy.fixed, default_qty_value=0,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ============== INPUTS ============== ----------------------------------------
+gST = "Supertrend (entry)"
+factor   = input.float(3.0, "ATR Multiplier", minval=1, maxval=100, step=0.5, group=gST,
+     tooltip="Bigger = fewer signals, looser stop. Smaller = more signals, tighter stop.")
+pd       = input.int(7, "Supertrend ATR Period", minval=1, maxval=100, group=gST)
+
+gR = "Risk Management"
+riskPct  = input.float(1.0, "Risk per Trade (% equity)", minval=0.01, maxval=10, step=0.1, group=gR,
+     tooltip="Position size auto-calculated so a stop-out costs this % of equity.")
+slMult   = input.float(1.5, "Initial Stop  (× ATR14)", minval=0.1, step=0.1, group=gR)
+tpMult   = input.float(3.0, "Take Profit   (× ATR14)", minval=0.1, step=0.1, group=gR,
+     tooltip="Keep ≥ 2× the SL multiple for positive R:R.")
+useBE    = input.bool(true,  "Move stop to break-even at +1R", group=gR)
+useTrail = input.bool(true,  "ATR-trail stop after +1R",        group=gR)
+trailMul = input.float(2.0, "Trailing Stop (× ATR14)", minval=0.1, step=0.1, group=gR)
+exitFlip = input.bool(true,  "Close early if Supertrend flips against you", group=gR)
+
+gF = "Filters (recommended ON)"
+useTrend = input.bool(true,  "Trade only with 200-EMA trend", group=gF)
+useHtf   = input.bool(true,  "Add higher-timeframe trend filter", group=gF,
+     tooltip="Longs only when daily close > daily EMA(200) and vice versa.")
+htfTf    = input.timeframe("D", "Higher Timeframe", group=gF)
+useRsi   = input.bool(true,  "Require RSI(14) > 50 (long) / < 50 (short)", group=gF)
+useAdx   = input.bool(true,  "Require ADX > threshold", group=gF)
+adxThr   = input.float(20.0, "ADX Threshold", minval=5, maxval=80, step=1, group=gF)
+useVol   = input.bool(false, "Require volume > average × multiplier", group=gF)
+volMul   = input.float(1.2, "Volume Multiplier", minval=1.0, step=0.1, group=gF)
+useLong  = input.bool(true,  "Take long trades",  group=gF)
+useShort = input.bool(false, "Take short trades", group=gF,
+     tooltip="Shorting is risky for beginners; off by default.")
+
+gS = "Session / Day Filter"
+useSess  = input.bool(false, "Trade only inside session window", group=gS)
+sessStr  = input.session("0930-1600", "Session (exchange time)", group=gS)
+trMon    = input.bool(true, "Mon", group=gS, inline="dow")
+trTue    = input.bool(true, "Tue", group=gS, inline="dow")
+trWed    = input.bool(true, "Wed", group=gS, inline="dow")
+trThu    = input.bool(true, "Thu", group=gS, inline="dow")
+trFri    = input.bool(true, "Fri", group=gS, inline="dow")
+trSat    = input.bool(true, "Sat", group=gS, inline="dow2")
+trSun    = input.bool(true, "Sun", group=gS, inline="dow2")
+
+gD = "Backtest Window"
+fromY = input.int(2020, "From Year",  minval=1970, group=gD)
+fromM = input.int(1,    "From Month", minval=1, maxval=12, group=gD)
+fromD = input.int(1,    "From Day",   minval=1, maxval=31, group=gD)
+toY   = input.int(2099, "To Year",    minval=1970, group=gD)
+toM   = input.int(12,   "To Month",   minval=1, maxval=12, group=gD)
+toD   = input.int(31,   "To Day",     minval=1, maxval=31, group=gD)
+
+gU = "Display"
+showLabels = input.bool(true, "Show entry/exit reason labels", group=gU)
+showTable  = input.bool(true, "Show info dashboard",            group=gU)
+shadeBG    = input.bool(true, "Shade background by trend",      group=gU)
+
+// ============== INDICATORS ============== ------------------------------------
+atrST   = ta.atr(pd)
+atrExit = ta.atr(14)
+ema200  = ta.ema(close, 200)
+htfEma  = request.security(syminfo.tickerid, htfTf, ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+htfClose= request.security(syminfo.tickerid, htfTf, close, lookahead=barmerge.lookahead_off)
+rsi14   = ta.rsi(close, 14)
+[diPlus, diMinus, adxV] = ta.dmi(14, 14)
+volMa   = ta.sma(volume, 20)
+
+// Supertrend (same math as the original, ported to Pine v5)
+src     = hl2
+upBasic = src - factor * atrST
+dnBasic = src + factor * atrST
+trendUp   = close[1] > nz(trendUp[1],   upBasic) ? math.max(upBasic, trendUp[1])   : upBasic
+trendDown = close[1] < nz(trendDown[1], dnBasic) ? math.min(dnBasic, trendDown[1]) : dnBasic
+trendDir  = close > nz(trendDown[1], dnBasic) ? 1 : close < nz(trendUp[1], upBasic) ? -1 : nz(trendDir[1], 1)
+tsl       = trendDir == 1 ? trendUp : trendDown
+
+stColor = trendDir == 1 ? color.new(color.green, 0) : color.new(color.red, 0)
+plot(tsl, "Supertrend", color=stColor, linewidth=2)
+plot(useTrend ? ema200 : na, "200 EMA", color=color.new(color.orange, 0), linewidth=1)
+plot(useHtf   ? htfEma : na, "HTF 200 EMA", color=color.new(color.fuchsia, 0), linewidth=1, style=plot.style_circles)
+bgcolor(shadeBG ? (trendDir == 1 ? color.new(color.green, 92) : color.new(color.red, 92)) : na)
+
+// ============== FILTERS ============== ---------------------------------------
+inWindow = time >= timestamp(fromY,fromM,fromD,0,0) and time <= timestamp(toY,toM,toD,23,59)
+dowOk = (dayofweek == dayofweek.monday    and trMon) or
+        (dayofweek == dayofweek.tuesday   and trTue) or
+        (dayofweek == dayofweek.wednesday and trWed) or
+        (dayofweek == dayofweek.thursday  and trThu) or
+        (dayofweek == dayofweek.friday    and trFri) or
+        (dayofweek == dayofweek.saturday  and trSat) or
+        (dayofweek == dayofweek.sunday    and trSun)
+sessOk = not useSess or not na(time(timeframe.period, sessStr))
+
+trendOkLong  = not useTrend or close > ema200
+trendOkShort = not useTrend or close < ema200
+htfOkLong    = not useHtf   or htfClose > htfEma
+htfOkShort   = not useHtf   or htfClose < htfEma
+rsiOkLong    = not useRsi   or rsi14 > 50
+rsiOkShort   = not useRsi   or rsi14 < 50
+adxOk        = not useAdx   or adxV > adxThr
+volOk        = not useVol   or volume > volMa * volMul
+
+flipUp   = trendDir ==  1 and trendDir[1] == -1
+flipDown = trendDir == -1 and trendDir[1] ==  1
+goLong   = flipUp   and useLong  and inWindow and dowOk and sessOk and trendOkLong  and htfOkLong  and rsiOkLong  and adxOk and volOk
+goShort  = flipDown and useShort and inWindow and dowOk and sessOk and trendOkShort and htfOkShort and rsiOkShort and adxOk and volOk
+
+plotshape(flipUp,   "Buy Flip",  shape.triangleup,   location.belowbar, color.new(color.green,40), size=size.tiny)
+plotshape(flipDown, "Sell Flip", shape.triangledown, location.abovebar, color.new(color.red,40),   size=size.tiny)
+
+// ============== POSITION SIZING ============== -------------------------------
+slDistLong  = slMult * atrExit
+slDistShort = slMult * atrExit
+qtyLong  = slDistLong  > 0 ? (strategy.equity * (riskPct / 100.0)) / slDistLong  : 0.0
+qtyShort = slDistShort > 0 ? (strategy.equity * (riskPct / 100.0)) / slDistShort : 0.0
+
+// ============== STRATEGY ============== --------------------------------------
+if goLong and qtyLong > 0
+    strategy.entry("Long", strategy.long, qty=qtyLong)
+    if showLabels
+        why = "BUY\n• Supertrend flipped UP" +
+              (useTrend ? "\n• Close > EMA200" : "") +
+              (useHtf   ? "\n• HTF close > HTF EMA200" : "") +
+              (useRsi   ? "\n• RSI(14) > 50  (" + str.tostring(rsi14,"#.#") + ")" : "") +
+              (useAdx   ? "\n• ADX > " + str.tostring(adxThr,"#.#") + "  (" + str.tostring(adxV,"#.#") + ")" : "") +
+              (useVol   ? "\n• Volume spike" : "") +
+              "\n• Risk " + str.tostring(riskPct,"#.##") + "%  Stop " + str.tostring(slMult,"#.#") + "×ATR  TP " + str.tostring(tpMult,"#.#") + "×ATR"
+        label.new(bar_index, low, why, style=label.style_label_up,
+             color=color.new(color.green, 15), textcolor=color.white, size=size.small)
+
+if goShort and qtyShort > 0
+    strategy.entry("Short", strategy.short, qty=qtyShort)
+    if showLabels
+        why = "SELL SHORT\n• Supertrend flipped DOWN" +
+              (useTrend ? "\n• Close < EMA200" : "") +
+              (useHtf   ? "\n• HTF close < HTF EMA200" : "") +
+              (useRsi   ? "\n• RSI(14) < 50  (" + str.tostring(rsi14,"#.#") + ")" : "") +
+              (useAdx   ? "\n• ADX > " + str.tostring(adxThr,"#.#") + "  (" + str.tostring(adxV,"#.#") + ")" : "") +
+              (useVol   ? "\n• Volume spike" : "") +
+              "\n• Risk " + str.tostring(riskPct,"#.##") + "%  Stop " + str.tostring(slMult,"#.#") + "×ATR  TP " + str.tostring(tpMult,"#.#") + "×ATR"
+        label.new(bar_index, high, why, style=label.style_label_down,
+             color=color.new(color.red, 15), textcolor=color.white, size=size.small)
+
+// --- Adaptive stop / target -------------------------------------------------
+var float activeStop = na
+var float activeTp   = na
+var bool  beArmed    = false
+
+// Reset trade state on each new entry
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entry  = strategy.position_avg_price
+    if strategy.position_size > 0
+        activeStop := entry - slMult * atrExit
+        activeTp   := entry + tpMult * atrExit
+    else
+        activeStop := entry + slMult * atrExit
+        activeTp   := entry - tpMult * atrExit
+    beArmed := false
+
+// Move to break-even at +1R, then optionally ATR-trail
+if strategy.position_size > 0
+    entry  = strategy.position_avg_price
+    oneR   = slMult * atrExit
+    if useBE and not beArmed and high - entry >= oneR
+        activeStop := math.max(activeStop, entry)
+        beArmed := true
+    if useTrail and beArmed
+        activeStop := math.max(activeStop, close - trailMul * atrExit)
+    strategy.exit("X-Long", from_entry="Long", stop=activeStop, limit=activeTp)
+
+if strategy.position_size < 0
+    entry  = strategy.position_avg_price
+    oneR   = slMult * atrExit
+    if useBE and not beArmed and entry - low >= oneR
+        activeStop := math.min(activeStop, entry)
+        beArmed := true
+    if useTrail and beArmed
+        activeStop := math.min(activeStop, close + trailMul * atrExit)
+    strategy.exit("X-Short", from_entry="Short", stop=activeStop, limit=activeTp)
+
+// Optional flip-exit (close early when trend reverses)
+if exitFlip and strategy.position_size > 0 and flipDown
+    strategy.close("Long",  comment="Trend flipped DOWN")
+if exitFlip and strategy.position_size < 0 and flipUp
+    strategy.close("Short", comment="Trend flipped UP")
+
+if strategy.position_size == 0
+    activeStop := na
+    activeTp   := na
+    beArmed    := false
+
+// Live SL / TP / trail visualisation -----------------------------------------
+plot(strategy.position_size != 0 ? activeStop : na, "Stop",   color=color.new(color.red,  0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size != 0 ? activeTp   : na, "Target", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1)
+
+// ============== INFO DASHBOARD ============== --------------------------------
+var table tbl = table.new(position.top_right, 2, 9, border_width=1)
+if showTable and barstate.islast
+    trendTxt = trendDir == 1 ? "UP — long bias" : "DOWN — short bias"
+    rrTxt    = str.tostring(tpMult / slMult, "#.##") + " : 1"
+    posTxt   = strategy.position_size > 0 ? "LONG "  + str.tostring(strategy.position_size, "#.####") :
+               strategy.position_size < 0 ? "SHORT " + str.tostring(-strategy.position_size,"#.####") : "FLAT"
+    qtyTxt   = "L " + str.tostring(qtyLong, "#.####") + "  /  S " + str.tostring(qtyShort, "#.####")
+    filtTxt  = (useTrend ? "EMA " : "") + (useHtf ? "HTF " : "") + (useRsi ? "RSI " : "") +
+               (useAdx ? "ADX " : "")  + (useVol ? "VOL " : "")  + (useSess ? "SESS " : "")
+    table.cell(tbl, 0, 0, "Trend",     bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, trendTxt,    bgcolor=color.new(color.black,60), text_color=trendDir==1?color.lime:color.red, text_size=size.small)
+    table.cell(tbl, 0, 1, "Supertrend",bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(tsl,"#.##"),     bgcolor=color.new(color.black,60), text_color=color.aqua, text_size=size.small)
+    table.cell(tbl, 0, 2, "ATR(14)",   bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(atrExit,"#.####"), bgcolor=color.new(color.black,60), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 3, "RSI / ADX", bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(rsi14,"#.#") + " / " + str.tostring(adxV,"#.#"), bgcolor=color.new(color.black,60), text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 4, "Risk / R:R",bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(riskPct,"#.##")+"%  /  "+rrTxt, bgcolor=color.new(color.black,60), text_color=color.orange, text_size=size.small)
+    table.cell(tbl, 0, 5, "Stop dist", bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(slMult*atrExit,"#.##"), bgcolor=color.new(color.black,60), text_color=color.red, text_size=size.small)
+    table.cell(tbl, 0, 6, "Active Qty",bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 6, qtyTxt,      bgcolor=color.new(color.black,60), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 7, "Position",  bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 7, posTxt,      bgcolor=color.new(color.black,60), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 8, "Filters ON",bgcolor=color.new(color.gray,70), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 8, filtTxt == "" ? "(none)" : filtTxt, bgcolor=color.new(color.black,60), text_color=color.aqua, text_size=size.small)
+
+// ============== ALERTS ============== ----------------------------------------
+alertcondition(goLong,  "Long Entry",  "Tame v3: Supertrend flipped UP — long signal")
+alertcondition(goShort, "Short Entry", "Tame v3: Supertrend flipped DOWN — short signal")
+alertcondition(exitFlip and strategy.position_size > 0 and flipDown, "Long Exit (flip)",  "Tame v3: closing long — trend flipped DOWN")
+alertcondition(exitFlip and strategy.position_size < 0 and flipUp,   "Short Exit (flip)", "Tame v3: closing short — trend flipped UP")
+alertcondition(useBE and strategy.position_size > 0 and not beArmed[1] and beArmed, "Long BE armed",  "Tame v3: long stop moved to break-even")
+alertcondition(useBE and strategy.position_size < 0 and not beArmed[1] and beArmed, "Short BE armed", "Tame v3: short stop moved to break-even")

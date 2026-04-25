@@ -23,6 +23,7 @@ from .strategies.donchian_breakout import DonchianBreakout
 from .strategies.ema_crossover import EmaCrossover
 from .strategies.macd_divergence import MacdDivergence
 from .strategies.rsi_reversion import RsiReversion
+from .strategies.supertrend import Supertrend
 
 STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "ema_crossover": EmaCrossover,
@@ -30,6 +31,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     "bollinger_squeeze": BollingerSqueeze,
     "macd_divergence": MacdDivergence,
     "donchian_breakout": DonchianBreakout,
+    "supertrend": Supertrend,
 }
 
 

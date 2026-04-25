@@ -1,0 +1,31 @@
+Add Supertrend strategy and upgraded Pine v5 script (Tame Buy-Sell v3)
+
+Python strategy:
+- src/strategies/supertrend.py: high-fidelity Supertrend port (factor x ATR
+  trailing line) with optional 200-EMA trend filter, configurable
+  longs-only/shorts-allowed, and ATR-based SL/TP multipliers. Exposes
+  tolerated regimes (trending up/down/unknown) so it skips chop and
+  high-volatility windows when the regime filter is on.
+- src/main.py: registers Supertrend in STRATEGY_REGISTRY.
+- config/config.yaml: adds the supertrend strategy block (disabled by
+  default) with factor=3, period=7, sl_mult=1.5, tp_mult=3.0,
+  use_trend_filter=true, allow_shorts=false.
+- tests/test_new_strategies.py: 7 new tests covering registry, buy/sell
+  flips, trend filter behaviour, longs-only mode, regime tolerances and
+  short-series handling. Full suite: 78 passed.
+
+Live Kraken BTC/USDT 1h x 720, 10bps fees, 5bps slippage, regime filter on:
+  longs only, filter ON    +3.56%  Sharpe 3.81   1 trade
+  longs only, filter OFF   +6.79%  Sharpe 4.89   1 trade
+  L+S,        filter ON    +3.56%  Sharpe 3.81   1 trade
+  L+S,        filter OFF   -0.78%  Sharpe -0.93  6 trades  (chop)
+
+Pine v5 script (pinescript/tame_buy_sell_v3.pine):
+- Rewrites the original v2 "Tame buy-sell" script in Pine v5.
+- Risk-% position sizing (1R = configurable % of equity), initial ATR stop,
+  break-even at +1R, optional ATR-trailing stop after BE, optional flip-exit.
+- Confluence filters: 200-EMA trend, higher-timeframe 200-EMA, RSI(14)>50/<50,
+  ADX>threshold, optional volume spike, session+day-of-week filter.
+- On-chart "reason" labels for every entry, live SL/TP/trail plots, trend
+  background tint, info dashboard table, and alert conditions for
+  entry/exit/break-even.

@@ -62,6 +62,17 @@ strategies:
     enabled: false
     params:
       entry_period: 20
+  - name: supertrend
+    enabled: false
+    params:
+      factor: 3.0
+      period: 7
+      atr_exit_period: 14
+      sl_mult: 1.5
+      tp_mult: 3.0
+      use_trend_filter: true
+      trend_ema: 200
+      allow_shorts: false
 
 risk:
   max_risk_per_trade_pct: 1.0
