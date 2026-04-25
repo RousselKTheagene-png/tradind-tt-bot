@@ -101,13 +101,15 @@ bgcolor(shadeBG ? (trendDir == 1 ? color.new(color.green, 92) : color.new(color.
 
 // ============== FILTERS ============== ---------------------------------------
 inWindow = time >= timestamp(fromY,fromM,fromD,0,0) and time <= timestamp(toY,toM,toD,23,59)
-dowOk = (dayofweek == dayofweek.monday    and trMon) or
-        (dayofweek == dayofweek.tuesday   and trTue) or
-        (dayofweek == dayofweek.wednesday and trWed) or
-        (dayofweek == dayofweek.thursday  and trThu) or
-        (dayofweek == dayofweek.friday    and trFri) or
-        (dayofweek == dayofweek.saturday  and trSat) or
-        (dayofweek == dayofweek.sunday    and trSun)
+dowOk = switch dayofweek
+    dayofweek.monday    => trMon
+    dayofweek.tuesday   => trTue
+    dayofweek.wednesday => trWed
+    dayofweek.thursday  => trThu
+    dayofweek.friday    => trFri
+    dayofweek.saturday  => trSat
+    dayofweek.sunday    => trSun
+    => true
 sessOk = not useSess or not na(time(timeframe.period, sessStr))
 
 trendOkLong  = not useTrend or close > ema200
