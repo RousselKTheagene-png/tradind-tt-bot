@@ -73,6 +73,20 @@ strategies:
       use_trend_filter: true
       trend_ema: 200
       allow_shorts: false
+  - name: rsi_macd_confluence
+    enabled: false
+    params:
+      rsi_period: 14
+      oversold: 30
+      overbought: 70
+      fast: 12
+      slow: 26
+      signal: 9
+      divergence_lookback: 60
+      pivot_order: 3
+      hist_reversal_bars: 3
+      zero_cross_lookback: 5
+      confirm_window: 5
 
 risk:
   max_risk_per_trade_pct: 1.0

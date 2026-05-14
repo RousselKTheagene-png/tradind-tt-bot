@@ -9,6 +9,7 @@ from src.strategies.base import Side
 from src.strategies.bollinger_squeeze import BollingerSqueeze
 from src.strategies.donchian_breakout import DonchianBreakout
 from src.strategies.macd_divergence import MacdDivergence
+from src.strategies.rsi_macd_confluence import RsiMacdConfluence
 from src.strategies.supertrend import Supertrend
 
 
@@ -25,7 +26,8 @@ def _ohlcv_from_close(close: np.ndarray) -> pd.DataFrame:
 
 def test_strategies_registered():
     for name in ("bollinger_squeeze", "macd_divergence",
-                 "donchian_breakout", "supertrend"):
+                 "donchian_breakout", "supertrend",
+                 "rsi_macd_confluence"):
         assert name in STRATEGY_REGISTRY
 
 
@@ -263,3 +265,91 @@ def test_supertrend_regime_preferences():
 def test_supertrend_short_series_returns_none():
     df = _ohlcv_with_range(np.full(50, 100.0))
     assert Supertrend().generate_signal("X", df) is None
+
+
+# --- RSI / MACD confluence ---------------------------------------------------
+
+def _make_oversold_then_macd_bull_series() -> np.ndarray:
+    # Long slow grind down drives RSI deep into oversold and pulls MACD below
+    # zero; a sharp 10-bar rally crosses RSI back through 30, flips the
+    # histogram positive, and crosses MACD above zero -- all within the
+    # confirmation window.
+    rng = np.random.default_rng(5)
+    down = np.linspace(100.0, 70.0, 230) + rng.normal(0, 0.2, 230)
+    rally = np.linspace(70.0, 90.0, 10)
+    return np.concatenate([down, rally])
+
+
+def _make_overbought_then_macd_bear_series() -> np.ndarray:
+    rng = np.random.default_rng(6)
+    up = np.linspace(100.0, 140.0, 230) + rng.normal(0, 0.2, 230)
+    drop = np.linspace(140.0, 120.0, 10)
+    return np.concatenate([up, drop])
+
+
+def test_rsi_macd_confluence_long_signal():
+    df = _ohlcv_from_close(_make_oversold_then_macd_bull_series())
+    strat = RsiMacdConfluence(confirm_window=15, zero_cross_lookback=15)
+    sig = strat.generate_signal("X", df)
+    assert sig is not None
+    assert sig.side == Side.BUY
+    assert sig.metadata["confirmations"]
+    assert "RSI reversion up" in sig.reason
+
+
+def test_rsi_macd_confluence_short_signal():
+    df = _ohlcv_from_close(_make_overbought_then_macd_bear_series())
+    strat = RsiMacdConfluence(confirm_window=15, zero_cross_lookback=15)
+    sig = strat.generate_signal("X", df)
+    assert sig is not None
+    assert sig.side == Side.SELL
+    assert sig.metadata["confirmations"]
+    assert "RSI reversion down" in sig.reason
+
+
+def test_rsi_macd_confluence_flat_returns_none():
+    rng = np.random.default_rng(0)
+    flat = 100 + rng.normal(0, 0.1, 240)
+    df = _ohlcv_from_close(flat)
+    assert RsiMacdConfluence().generate_signal("X", df) is None
+
+
+def test_rsi_macd_confluence_requires_macd_confirmation():
+    # RSI exits oversold but MACD has not flipped (still strongly bearish).
+    # Build a series with a brief recovery that doesn't move MACD.
+    rng = np.random.default_rng(2)
+    n = 200
+    close = np.full(n, 100.0)
+    close[:120] = 100 + rng.normal(0, 0.1, 120)
+    close[120:140] = np.linspace(100, 92, 20)   # quick dip
+    close[140:160] = np.linspace(92, 99, 20)    # quick recovery -> RSI exits oversold
+    close[160:] = 99 + rng.normal(0, 0.1, n - 160)
+    df = _ohlcv_from_close(close)
+    strat = RsiMacdConfluence(confirm_window=2, divergence_lookback=40,
+                              zero_cross_lookback=2, hist_reversal_bars=5)
+    # Either no signal or, if there is one, confirmations must be non-empty.
+    sig = strat.generate_signal("X", df)
+    if sig is not None:
+        assert sig.metadata["confirmations"]
+
+
+def test_rsi_macd_confluence_strength_scales_with_confirmations():
+    df = _ohlcv_from_close(_make_oversold_then_macd_bull_series())
+    sig = RsiMacdConfluence(confirm_window=15,
+                            zero_cross_lookback=15).generate_signal("X", df)
+    assert sig is not None
+    # 0.5 base + 0.15 per active confirmation, capped at 0.95
+    assert 0.6 <= sig.strength <= 0.95
+
+
+def test_rsi_macd_confluence_regime_preferences():
+    s = RsiMacdConfluence()
+    assert s.accepts_regime("ranging")
+    assert s.accepts_regime("trending_up")
+    assert s.accepts_regime("trending_down")
+    assert s.accepts_regime("unknown")
+
+
+def test_rsi_macd_confluence_short_series_returns_none():
+    df = _ohlcv_from_close(np.full(80, 100.0))
+    assert RsiMacdConfluence().generate_signal("X", df) is None
