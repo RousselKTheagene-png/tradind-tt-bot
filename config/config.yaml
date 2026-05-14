@@ -74,9 +74,12 @@ strategies:
       trend_ema: 200
       allow_shorts: false
   - name: rsi_macd_confluence
-    enabled: false
+    enabled: true
     params:
-      rsi_period: 14
+      # Walk-forward tuned on BTC/USDT 1h (7 folds, 600/200):
+      # rsi=10, confirm_window=12 was the most stable selected config,
+      # producing positive OOS returns on every fold it was chosen for.
+      rsi_period: 10
       oversold: 30
       overbought: 70
       fast: 12
@@ -86,7 +89,7 @@ strategies:
       pivot_order: 3
       hist_reversal_bars: 3
       zero_cross_lookback: 5
-      confirm_window: 5
+      confirm_window: 12
 
 risk:
   max_risk_per_trade_pct: 1.0

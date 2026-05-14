@@ -1,0 +1,192 @@
+//@version=5
+// =============================================================================
+//  RSI / MACD Confluence v1  (TradingView port of rsi_macd_confluence.py)
+//  Long  : RSI crosses up out of oversold within the last N bars
+//          + at least one MACD confirmation in the same window:
+//            (a) bullish price/MACD-histogram divergence
+//            (b) histogram reversal (declining -> rising)
+//            (c) MACD line crosses ABOVE zero
+//  Short : symmetric (RSI crosses down out of overbought + any bear conf)
+//  Risk-% sizing, ATR stop / TP, optional break-even and trailing stop,
+//  on-chart entry label that lists which confirmations fired.
+// =============================================================================
+strategy("RSI / MACD Confluence v1", overlay=true, pyramiding=0,
+     initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=0,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     slippage=2, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ============== INPUTS ============== ----------------------------------------
+gRSI = "RSI trigger"
+rsiPer     = input.int(10, "RSI Period", minval=2, group=gRSI)
+oversold   = input.float(30, "Oversold",   minval=1, maxval=50, group=gRSI)
+overbought = input.float(70, "Overbought", minval=50, maxval=99, group=gRSI)
+confWin    = input.int(12, "Confirm window (bars)", minval=1, maxval=30, group=gRSI,
+     tooltip="How recently the RSI cross-back must have happened.")
+
+gMACD = "MACD confirmations"
+fastLen    = input.int(12, "MACD Fast",   minval=1, group=gMACD)
+slowLen    = input.int(26, "MACD Slow",   minval=2, group=gMACD)
+sigLen     = input.int(9,  "MACD Signal", minval=1, group=gMACD)
+divLook    = input.int(60, "Divergence lookback", minval=10, maxval=200, group=gMACD)
+pivLen     = input.int(3,  "Pivot order",  minval=1, maxval=10, group=gMACD,
+     tooltip="Bars left/right that define a local extreme.")
+histBars   = input.int(3,  "Histogram reversal bars", minval=2, maxval=10, group=gMACD)
+zcLook     = input.int(5,  "Zero-cross lookback", minval=1, maxval=20, group=gMACD)
+useDiv     = input.bool(true,  "Use divergence",         group=gMACD)
+useHistRev = input.bool(true,  "Use histogram reversal", group=gMACD)
+useZeroX   = input.bool(true,  "Use MACD zero-cross",    group=gMACD)
+
+gR = "Risk Management"
+riskPct  = input.float(1.0, "Risk per Trade (% equity)", minval=0.01, maxval=10, step=0.1, group=gR)
+slMult   = input.float(1.5, "Initial Stop  (x ATR14)", minval=0.1, step=0.1, group=gR)
+tpMult   = input.float(3.0, "Take Profit   (x ATR14)", minval=0.1, step=0.1, group=gR)
+useBE    = input.bool(true,  "Move stop to break-even at +1R", group=gR)
+useTrail = input.bool(true,  "ATR-trail stop after +1R",        group=gR)
+trailMul = input.float(2.0, "Trailing Stop (x ATR14)", minval=0.1, step=0.1, group=gR)
+useLong  = input.bool(true,  "Take long trades",  group=gR)
+useShort = input.bool(true,  "Take short trades", group=gR)
+
+gU = "Display"
+showLabels = input.bool(true, "Show entry reason labels", group=gU)
+showTable  = input.bool(true, "Show info dashboard",      group=gU)
+
+// ============== INDICATORS ============== ------------------------------------
+r              = ta.rsi(close, rsiPer)
+[macdLn, sigLn, histLn] = ta.macd(close, fastLen, slowLen, sigLen)
+atr14          = ta.atr(14)
+
+// ---------- RSI cross triggers within confWin --------------------------------
+rsiCrossUp   = ta.crossover(r,  oversold)     // RSI crossed up through oversold
+rsiCrossDn   = ta.crossunder(r, overbought)   // RSI crossed down through overbought
+rsiLongTrig  = ta.barssince(rsiCrossUp) <= confWin
+rsiShortTrig = ta.barssince(rsiCrossDn) <= confWin
+
+// ---------- Pivots (last + previous) on price and histogram ------------------
+pl = ta.pivotlow(low,    pivLen, pivLen)
+ph = ta.pivothigh(high,  pivLen, pivLen)
+hl = ta.pivotlow(histLn, pivLen, pivLen)
+hh = ta.pivothigh(histLn,pivLen, pivLen)
+
+var float lastPL = na, var float prevPL = na, var int  lastPLbar = na
+var float lastPH = na, var float prevPH = na, var int  lastPHbar = na
+var float lastHL = na, var float prevHL = na
+var float lastHH = na, var float prevHH = na
+if not na(pl)
+    prevPL := lastPL,  lastPL := pl,  lastPLbar := bar_index - pivLen
+if not na(ph)
+    prevPH := lastPH,  lastPH := ph,  lastPHbar := bar_index - pivLen
+if not na(hl)
+    prevHL := lastHL,  lastHL := hl
+if not na(hh)
+    prevHH := lastHH,  lastHH := hh
+
+// ---------- (a) Divergence (last pivot within divLook) -----------------------
+divRecentL = not na(lastPLbar) and (bar_index - lastPLbar) <= divLook
+divRecentH = not na(lastPHbar) and (bar_index - lastPHbar) <= divLook
+bullDiv = useDiv and divRecentL and not na(prevPL) and not na(prevHL) and lastPL < prevPL and lastHL > prevHL
+bearDiv = useDiv and divRecentH and not na(prevPH) and not na(prevHH) and lastPH > prevPH and lastHH < prevHH
+
+// ---------- (b) Histogram momentum reversal (n bars decline -> 1 up) ---------
+histDecl = true
+histRise = true
+for i = 1 to histBars - 1
+    histDecl := histDecl and (histLn[i] - histLn[i + 1] < 0)
+    histRise := histRise and (histLn[i] - histLn[i + 1] > 0)
+histBullRev = useHistRev and histDecl and (histLn[0] - histLn[1] > 0)
+histBearRev = useHistRev and histRise and (histLn[0] - histLn[1] < 0)
+
+// ---------- (c) MACD zero-cross within zcLook -------------------------------
+zcUp = ta.crossover(macdLn, 0.0)
+zcDn = ta.crossunder(macdLn, 0.0)
+zeroUpRecent = useZeroX and (ta.barssince(zcUp) <= zcLook)
+zeroDnRecent = useZeroX and (ta.barssince(zcDn) <= zcLook)
+
+// ---------- Confluence ------------------------------------------------------
+longConfs  = (bullDiv ? 1 : 0) + (histBullRev ? 1 : 0) + (zeroUpRecent ? 1 : 0)
+shortConfs = (bearDiv ? 1 : 0) + (histBearRev ? 1 : 0) + (zeroDnRecent ? 1 : 0)
+goLong  = useLong  and rsiLongTrig  and longConfs  > 0 and strategy.position_size == 0
+goShort = useShort and rsiShortTrig and shortConfs > 0 and strategy.position_size == 0
+
+// ============== POSITION SIZING ============== -------------------------------
+slDist = slMult * atr14
+qtyL = slDist > 0 ? (strategy.equity * (riskPct / 100.0)) / slDist : 0.0
+qtyS = slDist > 0 ? (strategy.equity * (riskPct / 100.0)) / slDist : 0.0
+
+// ============== STRATEGY ============== --------------------------------------
+reasonLong  = "BUY  (RSI back > " + str.tostring(oversold,"#") + ")" +
+     (bullDiv      ? "\n* bull div"     : "") +
+     (histBullRev  ? "\n* hist reversal": "") +
+     (zeroUpRecent ? "\n* MACD>0 cross" : "")
+reasonShort = "SELL (RSI back < " + str.tostring(overbought,"#") + ")" +
+     (bearDiv      ? "\n* bear div"     : "") +
+     (histBearRev  ? "\n* hist reversal": "") +
+     (zeroDnRecent ? "\n* MACD<0 cross" : "")
+
+if goLong and qtyL > 0
+    strategy.entry("Long", strategy.long, qty=qtyL)
+    if showLabels
+        label.new(bar_index, low, reasonLong, style=label.style_label_up,
+             color=color.new(color.green, 15), textcolor=color.white, size=size.small)
+
+if goShort and qtyS > 0
+    strategy.entry("Short", strategy.short, qty=qtyS)
+    if showLabels
+        label.new(bar_index, high, reasonShort, style=label.style_label_down,
+             color=color.new(color.red, 15), textcolor=color.white, size=size.small)
+
+// --- Adaptive stop / target -------------------------------------------------
+var float activeStop = na, var float activeTp = na, var bool beArmed = false
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryP = strategy.position_avg_price
+    activeStop := strategy.position_size > 0 ? entryP - slMult * atr14 : entryP + slMult * atr14
+    activeTp   := strategy.position_size > 0 ? entryP + tpMult * atr14 : entryP - tpMult * atr14
+    beArmed := false
+
+if strategy.position_size > 0
+    entryP = strategy.position_avg_price
+    oneR   = slMult * atr14
+    if useBE and not beArmed and high - entryP >= oneR
+        activeStop := math.max(activeStop, entryP), beArmed := true
+    if useTrail and beArmed
+        activeStop := math.max(activeStop, close - trailMul * atr14)
+    strategy.exit("X-Long", from_entry="Long", stop=activeStop, limit=activeTp)
+
+if strategy.position_size < 0
+    entryP = strategy.position_avg_price
+    oneR   = slMult * atr14
+    if useBE and not beArmed and entryP - low >= oneR
+        activeStop := math.min(activeStop, entryP), beArmed := true
+    if useTrail and beArmed
+        activeStop := math.min(activeStop, close + trailMul * atr14)
+    strategy.exit("X-Short", from_entry="Short", stop=activeStop, limit=activeTp)
+
+if strategy.position_size == 0
+    activeStop := na, activeTp := na, beArmed := false
+
+plot(strategy.position_size != 0 ? activeStop : na, "Stop",   color=color.new(color.red,  0), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size != 0 ? activeTp   : na, "Target", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1)
+plotshape(goLong,  "Buy",  shape.triangleup,   location.belowbar, color.new(color.green,30), size=size.small)
+plotshape(goShort, "Sell", shape.triangledown, location.abovebar, color.new(color.red,  30), size=size.small)
+
+// ============== INFO DASHBOARD ============== --------------------------------
+var table tbl = table.new(position.top_right, 2, 7, border_width=1)
+if showTable and barstate.islast
+    posTxt   = strategy.position_size > 0 ? "LONG"  : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    table.cell(tbl, 0, 0, "RSI",          bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, str.tostring(r,"#.#"), bgcolor=color.new(color.black,60), text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 1, "MACD / Hist",  bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(macdLn,"#.##") + " / " + str.tostring(histLn,"#.##"), bgcolor=color.new(color.black,60), text_color=color.aqua, text_size=size.small)
+    table.cell(tbl, 0, 2, "ATR(14)",      bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(atr14,"#.####"), bgcolor=color.new(color.black,60), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 3, "Long confs",   bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(longConfs)  + " / 3", bgcolor=color.new(color.black,60), text_color=color.lime, text_size=size.small)
+    table.cell(tbl, 0, 4, "Short confs",  bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(shortConfs) + " / 3", bgcolor=color.new(color.black,60), text_color=color.red, text_size=size.small)
+    table.cell(tbl, 0, 5, "Risk / R:R",   bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(riskPct,"#.##")+"%  /  "+str.tostring(tpMult/slMult,"#.##")+":1", bgcolor=color.new(color.black,60), text_color=color.orange, text_size=size.small)
+    table.cell(tbl, 0, 6, "Position",     bgcolor=color.new(color.gray,70),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 6, posTxt,         bgcolor=color.new(color.black,60), text_color=color.white, text_size=size.small)
+
+// ============== ALERTS ============== ----------------------------------------
+alertcondition(goLong,  "Long Entry",  "RSI/MACD Confluence: LONG signal")
+alertcondition(goShort, "Short Entry", "RSI/MACD Confluence: SHORT signal")

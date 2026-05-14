@@ -26,11 +26,11 @@ class RsiMacdConfluence(Strategy):
     tolerated_regimes = frozenset({"ranging", "trending_up",
                                    "trending_down", "unknown"})
 
-    def __init__(self, rsi_period: int = 14, oversold: float = 30,
+    def __init__(self, rsi_period: int = 10, oversold: float = 30,
                  overbought: float = 70, fast: int = 12, slow: int = 26,
                  signal: int = 9, divergence_lookback: int = 60,
                  pivot_order: int = 3, hist_reversal_bars: int = 3,
-                 zero_cross_lookback: int = 5, confirm_window: int = 5,
+                 zero_cross_lookback: int = 5, confirm_window: int = 12,
                  **kwargs):
         super().__init__(rsi_period=rsi_period, oversold=oversold,
                          overbought=overbought, fast=fast, slow=slow,
