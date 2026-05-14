@@ -79,13 +79,15 @@ python -m src.main --mode paper --config config/config.yaml
 ## Roadmap
 
 - [x] Project scaffold
-- [ ] Data providers (crypto first)
-- [ ] Indicator library
-- [ ] Strategy base + example strategies
-- [ ] Risk manager
-- [ ] Paper broker
-- [ ] Backtest engine
-- [ ] Live broker adapters
+- [x] Data providers (crypto, stocks, forex)
+- [x] Indicator library
+- [x] Strategy base + example strategies
+  (EMA crossover, Donchian breakout, Bollinger squeeze, RSI reversion,
+  Supertrend, MACD divergence, RSI / MACD confluence)
+- [x] Risk manager
+- [x] Paper broker
+- [x] Backtest engine (with walk-forward optimizer)
+- [x] Live broker adapters (Alpaca, ccxt, OANDA)
 - [ ] ML regime classifier
 - [ ] Sentiment pipeline
-- [ ] Monitoring dashboard
+- [x] Monitoring dashboard
